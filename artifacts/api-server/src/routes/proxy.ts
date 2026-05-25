@@ -191,6 +191,36 @@ function rewriteHtml(html: string, pageUrl: string): string {
     base.remove();
   }
 
+  // Remove SRI integrity + crossorigin attrs — content is rewritten so hashes won't match
+  for (const el of root.querySelectorAll("script[integrity], link[integrity]")) {
+    el.removeAttribute("integrity");
+    el.removeAttribute("crossorigin");
+  }
+
+  // Rewrite <meta http-equiv="refresh" content="0; url=...">
+  for (const el of root.querySelectorAll('meta[http-equiv="refresh"], meta[http-equiv="Refresh"]')) {
+    const content = el.getAttribute("content") || "";
+    const rewritten = content.replace(/url=(['"]?)([^'";\s]+)\1/i, (_m, q, u) => {
+      const abs = resolveUrl(pageUrl, u);
+      return `url=${q}${rewriteUrl(abs)}${q}`;
+    });
+    if (rewritten !== content) el.setAttribute("content", rewritten);
+  }
+
+  // Rewrite CSS url() inside inline <style> blocks
+  for (const el of root.querySelectorAll("style")) {
+    const text = el.text;
+    if (text) el.set_content(rewriteCss(text, pageUrl));
+  }
+
+  // Rewrite url() in inline style attributes
+  for (const el of root.querySelectorAll("[style]")) {
+    const style = el.getAttribute("style") || "";
+    if (style.includes("url(")) {
+      el.setAttribute("style", rewriteCss(style, pageUrl));
+    }
+  }
+
   // Rewrite href on <a>, <area>, <link>
   for (const el of root.querySelectorAll("a[href], area[href], link[href]")) {
     const href = el.getAttribute("href");
@@ -268,7 +298,7 @@ function buildFetchHeaders(targetUrl: URL, isDocument: boolean, proxyCookie?: st
   return headers;
 }
 
-router.get("/proxy", async (req, res) => {
+router.all("/proxy", async (req, res) => {
   const targetUrl = req.query.url as string;
 
   if (!targetUrl) {
@@ -288,10 +318,28 @@ router.get("/proxy", async (req, res) => {
   const isDocument = !req.headers["x-requested-with"];
   const fetchHeaders = buildFetchHeaders(parsedUrl, isDocument, proxyCookie);
 
+  const method = req.method.toUpperCase();
+  const hasBody = method !== "GET" && method !== "HEAD";
+  let bodyInit: BodyInit | undefined;
+  if (hasBody) {
+    const chunks: Buffer[] = [];
+    await new Promise<void>((resolve) => {
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", resolve);
+    });
+    const raw = Buffer.concat(chunks);
+    if (raw.length > 0) {
+      bodyInit = raw;
+      const ct = req.headers["content-type"];
+      if (ct) fetchHeaders["Content-Type"] = ct;
+    }
+  }
+
   try {
     const response = await fetch(targetUrl, {
-      method: "GET",
+      method,
       headers: fetchHeaders,
+      body: bodyInit,
       redirect: "follow",
     });
 

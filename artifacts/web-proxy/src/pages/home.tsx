@@ -32,6 +32,92 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 
+// ── Morphing icon: shield → sword → diamond wave animation ──────────────
+const SHAPES = [
+  {
+    // Shield
+    d: "M16,3 L5.5,8 L5.5,17 C5.5,22.5 10.2,26.8 16,29 C21.8,26.8 26.5,22.5 26.5,17 L26.5,8 Z",
+    perimeter: 102,
+  },
+  {
+    // Sword (blade tip up, crossguard, pommel)
+    d: "M16,2 L17.2,19 L21.5,21.2 L21.5,23 L17.2,23 L17.2,28 L14.8,28 L14.8,23 L10.5,23 L10.5,21.2 L14.8,19 Z",
+    perimeter: 90,
+  },
+  {
+    // Diamond
+    d: "M16,2 L28,16 L16,30 L4,16 Z",
+    perimeter: 76,
+  },
+];
+
+function MorphIcon() {
+  const [phase, setPhase] = useState(0);
+  const [prev, setPrev] = useState<number | null>(null);
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      setPhase((p) => {
+        setPrev(p);
+        return (p + 1) % SHAPES.length;
+      });
+    }, 2600);
+    return () => clearInterval(t);
+  }, []);
+
+  const CX = "hsl(180 100% 50%)";
+
+  return (
+    <svg viewBox="0 0 32 32" width="80" height="80" style={{ overflow: "visible" }}>
+      {/* Wave rings */}
+      {[0, 1, 2].map((i) => (
+        <circle key={i} cx="16" cy="16" r="14" fill="none" stroke={CX} strokeWidth="0.6"
+          style={{
+            opacity: 0,
+            animation: `waveRing 2.6s ease-out ${i * 0.7}s infinite`,
+          }} />
+      ))}
+      {/* Previous shape — fade out */}
+      {prev !== null && prev !== phase && (
+        <path
+          key={`prev-${prev}`}
+          d={SHAPES[prev].d}
+          fill="none"
+          stroke={CX}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ animation: "morphFadeOut 0.7s ease forwards" }}
+        />
+      )}
+      {/* Current shape — draw in */}
+      <path
+        key={`shape-${phase}`}
+        d={SHAPES[phase].d}
+        fill="none"
+        stroke={CX}
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeDasharray={SHAPES[phase].perimeter}
+        strokeDashoffset={SHAPES[phase].perimeter}
+        style={{
+          filter: `drop-shadow(0 0 6px hsl(180 100% 50% / 0.7))`,
+          animation: `morphDrawIn 1.1s cubic-bezier(0.4,0,0.2,1) 0.1s forwards`,
+        }}
+      />
+      {/* Inner glow fill */}
+      <path
+        key={`fill-${phase}`}
+        d={SHAPES[phase].d}
+        fill="hsl(180 100% 50% / 0.06)"
+        stroke="none"
+        style={{ animation: "morphFadeIn 1.2s ease forwards" }}
+      />
+    </svg>
+  );
+}
+
 function ensureProtocol(url: string): string {
   const trimmed = url.trim();
   if (!trimmed) return "";
@@ -394,14 +480,9 @@ export default function Home() {
             {/* Radial gradient fade over grid */}
             <div className="absolute inset-0" style={{ background: "radial-gradient(ellipse 60% 60% at 50% 50%, transparent 20%, hsl(240 10% 4%) 80%)" }} />
 
-            {/* Shield icon with pulse ring */}
-            <div className="relative z-10">
-              <div className="absolute inset-0 rounded-full animate-ping opacity-20"
-                style={{ background: "radial-gradient(circle, hsl(180 100% 50%) 0%, transparent 70%)", transform: "scale(1.8)" }} />
-              <div className="relative h-16 w-16 flex items-center justify-center rounded-full"
-                style={{ background: "radial-gradient(circle, hsl(180 100% 50% / 0.15) 0%, transparent 70%)" }}>
-                <Shield className="h-10 w-10" style={{ color: "hsl(180 100% 50%)", filter: "drop-shadow(0 0 12px hsl(180 100% 50% / 0.6))" }} />
-              </div>
+            {/* Morphing icon: shield → sword → diamond, with wave rings */}
+            <div className="relative z-10 h-20 w-20 flex items-center justify-center">
+              <MorphIcon />
             </div>
 
             {/* Title */}
@@ -447,6 +528,25 @@ export default function Home() {
             0%   { width: 0%;  margin-left: 0%; }
             50%  { width: 60%; margin-left: 20%; }
             100% { width: 0%;  margin-left: 100%; }
+          }
+          @keyframes morphDrawIn {
+            0%   { stroke-dashoffset: var(--perimeter, 110); opacity: 0; }
+            15%  { opacity: 1; }
+            100% { stroke-dashoffset: 0; opacity: 1; }
+          }
+          @keyframes morphFadeOut {
+            0%   { opacity: 1; }
+            100% { opacity: 0; transform: scale(0.88); }
+          }
+          @keyframes morphFadeIn {
+            0%   { opacity: 0; }
+            60%  { opacity: 0; }
+            100% { opacity: 1; }
+          }
+          @keyframes waveRing {
+            0%   { opacity: 0;    transform: scale(0.6); }
+            20%  { opacity: 0.35; }
+            100% { opacity: 0;    transform: scale(1.9); }
           }
         `,
       }} />
