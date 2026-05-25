@@ -3,24 +3,48 @@ import { parse as parseHTML } from "node-html-parser";
 
 const router = Router();
 
-const BROWSER_HEADERS = {
+const BROWSER_HEADERS_BASE: Record<string, string> = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
   "Cache-Control": "no-cache",
   Pragma: "no-cache",
   "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
   "Sec-CH-UA-Mobile": "?0",
   "Sec-CH-UA-Platform": '"Windows"',
+};
+
+const BROWSER_HEADERS_DOCUMENT: Record<string, string> = {
+  ...BROWSER_HEADERS_BASE,
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
   "Sec-Fetch-Dest": "document",
   "Sec-Fetch-Mode": "navigate",
   "Sec-Fetch-Site": "none",
   "Sec-Fetch-User": "?1",
   "Upgrade-Insecure-Requests": "1",
 };
+
+const BROWSER_HEADERS_RESOURCE: Record<string, string> = {
+  ...BROWSER_HEADERS_BASE,
+  Accept: "*/*",
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "same-origin",
+};
+
+// Headers we must never forward to the browser (they'd cause double-decompression or other issues)
+const STRIP_RESPONSE_HEADERS = new Set([
+  "content-encoding",
+  "transfer-encoding",
+  "x-frame-options",
+  "content-security-policy",
+  "content-security-policy-report-only",
+  "strict-transport-security",
+  "x-content-type-options",
+  "referrer-policy",
+]);
+
+const PROXY_PATH = "/api/proxy";
 
 function resolveUrl(base: string, relative: string): string {
   try {
@@ -30,39 +54,115 @@ function resolveUrl(base: string, relative: string): string {
   }
 }
 
-function rewriteUrl(url: string, proxyBase: string): string {
-  if (!url || url.startsWith("data:") || url.startsWith("blob:") || url.startsWith("javascript:") || url.startsWith("#")) {
+function rewriteUrl(url: string): string {
+  if (
+    !url ||
+    url.startsWith("data:") ||
+    url.startsWith("blob:") ||
+    url.startsWith("javascript:") ||
+    url.startsWith("#") ||
+    url.startsWith(PROXY_PATH)
+  ) {
     return url;
   }
-  return `${proxyBase}?url=${encodeURIComponent(url)}`;
+  return `${PROXY_PATH}?url=${encodeURIComponent(url)}`;
 }
 
-function rewriteHtml(html: string, pageUrl: string, proxyBase: string): string {
+function buildInjectedScript(pageUrl: string): string {
+  return `<script>
+(function() {
+  var __PX_URL__ = ${JSON.stringify(pageUrl)};
+  var __PX_BASE__ = ${JSON.stringify(PROXY_PATH)};
+
+  function toProxyUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    try {
+      if (url.indexOf(__PX_BASE__ + '?url=') !== -1) return url;
+      if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') || url.startsWith('#')) return url;
+      var abs = new URL(url, __PX_URL__).href;
+      return __PX_BASE__ + '?url=' + encodeURIComponent(abs);
+    } catch(e) { return url; }
+  }
+
+  function extractOriginalUrl(href) {
+    try {
+      var u = new URL(href, location.href);
+      var param = u.searchParams.get('url');
+      return param || href;
+    } catch(e) { return href; }
+  }
+
+  function notify(url, title) {
+    try { window.parent.postMessage({ type: 'proxy-navigate', url: url, title: title || document.title }, '*'); } catch(e) {}
+  }
+
+  window.addEventListener('load', function() { notify(__PX_URL__, document.title); });
+
+  // Intercept pushState / replaceState
+  var _push = history.pushState.bind(history);
+  var _replace = history.replaceState.bind(history);
+  history.pushState = function(s, t, url) {
+    if (url) { try { url = toProxyUrl(String(url)); } catch(e){} }
+    _push.call(history, s, t, url);
+    notify(extractOriginalUrl(location.href), document.title);
+  };
+  history.replaceState = function(s, t, url) {
+    if (url) { try { url = toProxyUrl(String(url)); } catch(e){} }
+    _replace.call(history, s, t, url);
+    notify(extractOriginalUrl(location.href), document.title);
+  };
+  window.addEventListener('popstate', function() { notify(extractOriginalUrl(location.href), document.title); });
+
+  // Intercept fetch
+  var _fetch = window.fetch;
+  window.fetch = function(input, init) {
+    try {
+      if (typeof input === 'string') { input = toProxyUrl(input); }
+      else if (input instanceof Request) { input = new Request(toProxyUrl(input.url), {method:input.method,headers:input.headers,body:input.body,mode:'cors',credentials:input.credentials,cache:input.cache,redirect:input.redirect,referrer:input.referrer,integrity:input.integrity}); }
+    } catch(e) {}
+    return _fetch.apply(window, [input, init]);
+  };
+
+  // Intercept XMLHttpRequest
+  var _open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, async, user, pass) {
+    try { url = toProxyUrl(String(url)); } catch(e) {}
+    return _open.call(this, method, url, async !== false, user, pass);
+  };
+
+  // Intercept window.open
+  var _winOpen = window.open;
+  window.open = function(url, target, features) {
+    try { if (url) url = toProxyUrl(String(url)); } catch(e) {}
+    return _winOpen.call(window, url, target, features);
+  };
+})();
+</script>`;
+}
+
+function rewriteHtml(html: string, pageUrl: string): string {
   const root = parseHTML(html, { lowerCaseTagName: false, comment: true });
 
-  // Rewrite href attributes on <a>, <link>
-  for (const el of root.querySelectorAll("a[href], area[href]")) {
+  // Remove existing base tags
+  for (const base of root.querySelectorAll("base")) {
+    base.remove();
+  }
+
+  // Rewrite href on <a>, <area>, <link>
+  for (const el of root.querySelectorAll("a[href], area[href], link[href]")) {
     const href = el.getAttribute("href");
     if (href) {
       const abs = resolveUrl(pageUrl, href);
-      el.setAttribute("href", rewriteUrl(abs, proxyBase));
+      el.setAttribute("href", rewriteUrl(abs));
     }
   }
 
-  for (const el of root.querySelectorAll("link[href]")) {
-    const href = el.getAttribute("href");
-    if (href) {
-      const abs = resolveUrl(pageUrl, href);
-      el.setAttribute("href", rewriteUrl(abs, proxyBase));
-    }
-  }
-
-  // Rewrite src on img, script, iframe, video, audio, source
+  // Rewrite src on all elements
   for (const el of root.querySelectorAll("[src]")) {
     const src = el.getAttribute("src");
     if (src) {
       const abs = resolveUrl(pageUrl, src);
-      el.setAttribute("src", rewriteUrl(abs, proxyBase));
+      el.setAttribute("src", rewriteUrl(abs));
     }
   }
 
@@ -70,12 +170,10 @@ function rewriteHtml(html: string, pageUrl: string, proxyBase: string): string {
   for (const el of root.querySelectorAll("[srcset]")) {
     const srcset = el.getAttribute("srcset");
     if (srcset) {
-      const rewritten = srcset.replace(/([^\s,]+)(\s*(?:\d+[wx])?)/g, (match, url, descriptor) => {
-        if (!url.startsWith("data:")) {
-          const abs = resolveUrl(pageUrl, url);
-          return rewriteUrl(abs, proxyBase) + descriptor;
-        }
-        return match;
+      const rewritten = srcset.replace(/([^\s,]+)(\s+(?:\d+(?:\.\d+)?[wx])?)?(,|\s*$)/g, (match, url, descriptor, sep) => {
+        if (!url || url.startsWith("data:")) return match;
+        const abs = resolveUrl(pageUrl, url);
+        return rewriteUrl(abs) + (descriptor || "") + (sep || "");
       });
       el.setAttribute("srcset", rewritten);
     }
@@ -86,68 +184,45 @@ function rewriteHtml(html: string, pageUrl: string, proxyBase: string): string {
     const action = el.getAttribute("action");
     if (action) {
       const abs = resolveUrl(pageUrl, action);
-      el.setAttribute("action", rewriteUrl(abs, proxyBase));
+      el.setAttribute("action", rewriteUrl(abs));
     }
   }
 
-  // Inject base target to open links in same iframe
+  // Inject interception script before anything else in <head>
+  const injected = buildInjectedScript(pageUrl);
   const head = root.querySelector("head");
   if (head) {
-    // Remove existing base tags
-    for (const base of root.querySelectorAll("base")) {
-      base.remove();
-    }
-  }
-
-  // Inject script to notify parent of URL changes and intercept fetch
-  const script = `
-<script>
-(function() {
-  function notifyParent(url, title) {
-    try {
-      window.parent.postMessage({ type: 'proxy-navigate', url: url, title: title || document.title }, '*');
-    } catch(e) {}
-  }
-  
-  // Notify on load
-  window.addEventListener('load', function() {
-    notifyParent(window.location.href, document.title);
-  });
-
-  // Intercept pushState/replaceState
-  var origPush = history.pushState.bind(history);
-  var origReplace = history.replaceState.bind(history);
-  history.pushState = function() {
-    origPush.apply(history, arguments);
-    notifyParent(window.location.href, document.title);
-  };
-  history.replaceState = function() {
-    origReplace.apply(history, arguments);
-    notifyParent(window.location.href, document.title);
-  };
-  window.addEventListener('popstate', function() {
-    notifyParent(window.location.href, document.title);
-  });
-})();
-</script>`;
-
-  if (head) {
-    head.insertAdjacentHTML("afterbegin", script);
+    head.insertAdjacentHTML("afterbegin", injected);
   } else {
     const body = root.querySelector("body");
-    if (body) body.insertAdjacentHTML("afterbegin", script);
+    if (body) {
+      body.insertAdjacentHTML("afterbegin", injected);
+    } else {
+      root.insertAdjacentHTML("afterbegin", injected);
+    }
   }
 
   return root.toString();
 }
 
-function rewriteCss(css: string, pageUrl: string, proxyBase: string): string {
-  // Rewrite url(...) in CSS
+function rewriteCss(css: string, pageUrl: string): string {
   return css.replace(/url\((['"]?)([^)'"]+)\1\)/gi, (match, quote, url) => {
     if (url.startsWith("data:") || url.startsWith("blob:")) return match;
     const abs = resolveUrl(pageUrl, url);
-    return `url(${quote}${rewriteUrl(abs, proxyBase)}${quote})`;
+    return `url(${quote}${rewriteUrl(abs)}${quote})`;
   });
+}
+
+function buildFetchHeaders(targetUrl: URL, isDocument: boolean, proxyCookie?: string): Record<string, string> {
+  const base = isDocument ? BROWSER_HEADERS_DOCUMENT : BROWSER_HEADERS_RESOURCE;
+  const headers: Record<string, string> = {
+    ...base,
+    Host: targetUrl.hostname,
+    Origin: `${targetUrl.protocol}//${targetUrl.hostname}`,
+    Referer: `${targetUrl.protocol}//${targetUrl.hostname}/`,
+  };
+  if (proxyCookie) headers["Cookie"] = proxyCookie;
+  return headers;
 }
 
 router.get("/proxy", async (req, res) => {
@@ -166,58 +241,73 @@ router.get("/proxy", async (req, res) => {
     return;
   }
 
-  const proxyBase = `${req.protocol}://${req.get("host")}/api/proxy`;
-
-  const forwardHeaders: Record<string, string> = { ...BROWSER_HEADERS };
-  forwardHeaders["Host"] = parsedUrl.hostname;
-  forwardHeaders["Origin"] = `${parsedUrl.protocol}//${parsedUrl.hostname}`;
-  forwardHeaders["Referer"] = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
-
-  // Forward cookies if any
-  const cookieHeader = req.headers["x-proxy-cookie"] as string;
-  if (cookieHeader) {
-    forwardHeaders["Cookie"] = cookieHeader;
-  }
+  const proxyCookie = req.headers["x-proxy-cookie"] as string | undefined;
+  const isDocument = !req.headers["x-requested-with"];
+  const fetchHeaders = buildFetchHeaders(parsedUrl, isDocument, proxyCookie);
 
   try {
     const response = await fetch(targetUrl, {
       method: "GET",
-      headers: forwardHeaders,
+      headers: fetchHeaders,
       redirect: "follow",
     });
 
-    const contentType = response.headers.get("content-type") || "";
+    const finalUrl = response.url || targetUrl;
+    const contentType = response.headers.get("content-type") || "application/octet-stream";
 
-    // Forward Set-Cookie as custom header (browsers can't set cross-origin cookies)
+    // Forward safe response headers, strip dangerous ones
+    response.headers.forEach((value, key) => {
+      const lower = key.toLowerCase();
+      if (!STRIP_RESPONSE_HEADERS.has(lower)) {
+        try { res.setHeader(key, value); } catch {}
+      }
+    });
+
+    // Override/add required headers
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "*");
+
+    // Forward cookies
     const setCookie = response.headers.get("set-cookie");
     if (setCookie) {
       res.setHeader("X-Proxy-Set-Cookie", setCookie);
     }
 
-    // Set CORS headers so iframe can load this
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("X-Frame-Options", "ALLOWALL");
-    res.setHeader("Content-Security-Policy", "");
-
     if (contentType.includes("text/html")) {
       const html = await response.text();
-      const rewritten = rewriteHtml(html, response.url || targetUrl, proxyBase);
+      const rewritten = rewriteHtml(html, finalUrl);
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(rewritten);
     } else if (contentType.includes("text/css")) {
       const css = await response.text();
-      const rewritten = rewriteCss(css, response.url || targetUrl, proxyBase);
-      res.setHeader("Content-Type", contentType);
+      const rewritten = rewriteCss(css, finalUrl);
+      res.setHeader("Content-Type", contentType.includes("charset") ? contentType : `${contentType}; charset=utf-8`);
       res.send(rewritten);
-    } else {
-      // For binary/other content, stream it through
+    } else if (contentType.includes("application/javascript") || contentType.includes("text/javascript")) {
+      // Pass JS through as-is — our injected fetch/XHR overrides handle the runtime
+      const js = await response.text();
       res.setHeader("Content-Type", contentType);
+      res.send(js);
+    } else {
       const buffer = await response.arrayBuffer();
+      res.setHeader("Content-Type", contentType);
       res.send(Buffer.from(buffer));
     }
   } catch (err) {
     req.log.error({ err, url: targetUrl }, "Proxy fetch failed");
-    res.status(502).json({ error: "Failed to fetch the requested URL", details: String(err) });
+    res.status(502).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><meta charset="utf-8"><title>Proxy Error</title>
+      <style>body{font-family:monospace;background:#0a0a0f;color:#e0e0e0;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px}h2{color:#00ffff;margin:0}p{color:#888;font-size:13px;margin:0;max-width:400px;text-align:center}</style>
+      </head>
+      <body>
+        <h2>Unable to load page</h2>
+        <p>${String(err).replace(/</g, "&lt;")}</p>
+        <p style="font-size:11px;color:#555">This site may block proxy access or require a direct connection.</p>
+      </body>
+      </html>
+    `);
   }
 });
 
