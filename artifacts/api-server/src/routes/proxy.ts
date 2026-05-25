@@ -340,16 +340,33 @@ router.all("/proxy", async (req, res) => {
   const hasBody = method !== "GET" && method !== "HEAD";
   let bodyInit: BodyInit | undefined;
   if (hasBody) {
-    const chunks: Buffer[] = [];
-    await new Promise<void>((resolve) => {
-      req.on("data", (chunk: Buffer) => chunks.push(chunk));
-      req.on("end", resolve);
-    });
-    const raw = Buffer.concat(chunks);
-    if (raw.length > 0) {
-      bodyInit = raw;
-      const ct = req.headers["content-type"];
+    const ct = req.headers["content-type"] || "";
+    // express.json() / express.urlencoded() may have already consumed the stream.
+    // If so, req.body is populated — reconstruct the raw body from it.
+    if (req.body !== undefined && req.body !== null && !(req.body instanceof Buffer)) {
+      if (ct.includes("application/json")) {
+        bodyInit = JSON.stringify(req.body);
+        fetchHeaders["Content-Type"] = ct;
+      } else if (ct.includes("application/x-www-form-urlencoded")) {
+        bodyInit = new URLSearchParams(req.body as Record<string, string>).toString();
+        fetchHeaders["Content-Type"] = ct;
+      }
+    } else if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+      // express.raw() middleware already gave us a Buffer
+      bodyInit = req.body;
       if (ct) fetchHeaders["Content-Type"] = ct;
+    } else {
+      // Stream not yet consumed — read it directly (e.g. multipart, binary, etc.)
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve) => {
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", resolve);
+      });
+      const raw = Buffer.concat(chunks);
+      if (raw.length > 0) {
+        bodyInit = raw;
+        if (ct) fetchHeaders["Content-Type"] = ct;
+      }
     }
   }
 
@@ -376,10 +393,20 @@ router.all("/proxy", async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
 
-    // Forward cookies
-    const setCookie = response.headers.get("set-cookie");
-    if (setCookie) {
-      res.setHeader("X-Proxy-Set-Cookie", setCookie);
+    // Forward ALL Set-Cookie headers from the target as real Set-Cookie on our domain.
+    // Stripping Domain forces the browser to store them under our domain, so they
+    // are automatically sent back as the Cookie header on every subsequent proxied
+    // request — this is how Cloudflare cf_clearance and site session tokens propagate.
+    const allSetCookies: string[] =
+      typeof (response.headers as any).getSetCookie === "function"
+        ? (response.headers as any).getSetCookie()
+        : [response.headers.get("set-cookie")].filter(Boolean);
+    if (allSetCookies.length > 0) {
+      const sanitized = allSetCookies.map((c) =>
+        // Strip Domain so the cookie belongs to our proxy domain, not the target's domain.
+        c.replace(/;\s*domain=[^;]*/gi, "")
+      );
+      res.setHeader("Set-Cookie", sanitized);
     }
 
     if (contentType.includes("text/html")) {

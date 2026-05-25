@@ -54,13 +54,13 @@ const SHAPES = [
 function MorphIcon() {
   const [phase, setPhase] = useState(0);
   const [prev, setPrev] = useState<number | null>(null);
+  const phaseRef = useRef(0);
 
   useEffect(() => {
     const t = setInterval(() => {
-      setPhase((p) => {
-        setPrev(p);
-        return (p + 1) % SHAPES.length;
-      });
+      setPrev(phaseRef.current);
+      phaseRef.current = (phaseRef.current + 1) % SHAPES.length;
+      setPhase(phaseRef.current);
     }, 2600);
     return () => clearInterval(t);
   }, []);
@@ -120,11 +120,15 @@ function MorphIcon() {
   );
 }
 
-function ensureProtocol(url: string): string {
-  const trimmed = url.trim();
+function ensureProtocol(input: string): string {
+  const trimmed = input.trim();
   if (!trimmed) return "";
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return `https://${trimmed}`;
+  // Looks like a domain if it has no spaces and contains a dot followed by a known-length TLD
+  const looksLikeUrl = !trimmed.includes(" ") && /\.[a-z]{2,}(\/|$|:)/i.test(trimmed);
+  if (looksLikeUrl) return `https://${trimmed}`;
+  // Treat everything else as a search query
+  return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
 }
 
 function proxyHref(original: string) {
@@ -335,7 +339,7 @@ export default function Home() {
             onChange={(e) => setUrlInput(e.target.value)}
             onFocus={(e) => { e.target.select(); setInputFocused(true); }}
             onBlur={() => setInputFocused(false)}
-            placeholder="Enter a URL"
+            placeholder="Enter a URL or search..."
             className={`w-full pl-9 pr-9 h-9 bg-secondary border transition-all text-sm ${
               inputFocused
                 ? "border-primary/60 shadow-[0_0_0_2px_hsl(180_100%_50%/0.12)]"
@@ -517,7 +521,7 @@ export default function Home() {
           ref={iframeRef}
           src={iframeSrc || undefined}
           className={`w-full h-full border-none block bg-white transition-opacity duration-300 ${hasPage ? "opacity-100" : "opacity-0 pointer-events-none"}`}
-          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
+          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals"
           onLoad={handleIframeLoad}
           title="Proxy View"
           data-testid="proxy-iframe"
