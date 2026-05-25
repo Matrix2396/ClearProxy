@@ -74,16 +74,30 @@ function buildInjectedScript(pageUrl: string): string {
   var __PX_URL__ = ${JSON.stringify(pageUrl)};
   var __PX_BASE__ = ${JSON.stringify(PROXY_PATH)};
 
-  // Save real parent BEFORE any overrides so postMessage still works
+  // ── Capture real refs BEFORE any overrides ──────────────────────────
   var _realParent = window.parent;
+  var _realOrigin = location.origin;   // needed for WS proxy URL after location override
 
   // ── Iframe detection bypass ──────────────────────────────────────────
-  // Many sites refuse to render inside iframes. We override these so the
-  // page believes it is the top-level window.
   try { Object.defineProperty(window, 'self',        { get: function() { return window; }, configurable: true }); } catch(e) {}
   try { Object.defineProperty(window, 'top',         { get: function() { return window; }, configurable: true }); } catch(e) {}
   try { Object.defineProperty(window, 'frameElement',{ get: function() { return null;   }, configurable: true }); } catch(e) {}
   try { Object.defineProperty(window, 'parent',      { get: function() { return window; }, configurable: true }); } catch(e) {}
+
+  // ── Location spoofing ────────────────────────────────────────────────
+  // Many sites (chess.com, etc.) check location.hostname to decide whether
+  // to render. Override so the page sees its own domain, not our proxy.
+  try {
+    var _pxU = new URL(__PX_URL__);
+    var _pxProto    = _pxU.protocol;
+    var _pxHostname = _pxU.hostname;
+    var _pxHost     = _pxU.port ? _pxU.hostname + ':' + _pxU.port : _pxU.hostname;
+    var _pxOriginFake = _pxProto + '//' + _pxHost;
+    try { Object.defineProperty(location, 'hostname', { get: function() { return _pxHostname; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'host',     { get: function() { return _pxHost;     }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'origin',   { get: function() { return _pxOriginFake; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'protocol', { get: function() { return _pxProto;    }, configurable: true }); } catch(e) {}
+  } catch(e) {}
 
   // ── URL helpers ──────────────────────────────────────────────────────
   function toProxyUrl(url) {
@@ -99,7 +113,8 @@ function buildInjectedScript(pageUrl: string): string {
   function toWsProxyUrl(url) {
     try {
       var abs = new URL(url, __PX_URL__).href;
-      var wsBase = location.origin.replace(/^http/, 'ws') + '/api/ws-proxy';
+      // Use _realOrigin (captured before override) so the WS proxy URL points to OUR server
+      var wsBase = _realOrigin.replace(/^http/, 'ws') + '/api/ws-proxy';
       return wsBase + '?url=' + encodeURIComponent(abs);
     } catch(e) { return url; }
   }
@@ -314,7 +329,10 @@ router.all("/proxy", async (req, res) => {
     return;
   }
 
-  const proxyCookie = req.headers["x-proxy-cookie"] as string | undefined;
+  // Use explicit proxy cookie header first; fall back to the browser's own Cookie
+  // header (which accumulates Set-Cookie values our proxy previously forwarded,
+  // including Cloudflare cf_clearance and site session tokens).
+  const proxyCookie = (req.headers["x-proxy-cookie"] || req.headers["cookie"]) as string | undefined;
   const isDocument = !req.headers["x-requested-with"];
   const fetchHeaders = buildFetchHeaders(parsedUrl, isDocument, proxyCookie);
 

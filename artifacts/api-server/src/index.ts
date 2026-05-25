@@ -49,7 +49,13 @@ httpServer.on("upgrade", (request, socket, head) => {
       origin = "https://chess.com";
     }
 
-    const targetWs = new WebSocket(targetUrl, {
+    // Forward subprotocols the client requested (e.g. chess.com sends specific protocol ids)
+    const protocolHeader = request.headers["sec-websocket-protocol"];
+    const subprotocols = protocolHeader
+      ? protocolHeader.split(",").map((p) => p.trim())
+      : undefined;
+
+    const targetWs = new WebSocket(targetUrl, subprotocols, {
       headers: {
         "User-Agent": BROWSER_UA,
         Origin: origin,

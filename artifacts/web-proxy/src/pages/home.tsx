@@ -69,12 +69,14 @@ function MorphIcon() {
 
   return (
     <svg viewBox="0 0 32 32" width="80" height="80" style={{ overflow: "visible" }}>
-      {/* Wave rings */}
-      {[0, 1, 2].map((i) => (
-        <circle key={i} cx="16" cy="16" r="14" fill="none" stroke={CX} strokeWidth="0.6"
+      {/* Wave rings — transform-origin must be fill-box center so they expand outward */}
+      {[0, 1].map((i) => (
+        <circle key={i} cx="16" cy="16" r="13" fill="none" stroke={CX} strokeWidth="0.8"
           style={{
             opacity: 0,
-            animation: `waveRing 2.6s ease-out ${i * 0.7}s infinite`,
+            transformBox: "fill-box" as React.CSSProperties["transformBox"],
+            transformOrigin: "center",
+            animation: `waveRing 2.8s ease-out ${i * 1.1}s infinite`,
           }} />
       ))}
       {/* Previous shape — fade out */}
