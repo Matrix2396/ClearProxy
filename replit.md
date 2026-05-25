@@ -1,10 +1,11 @@
-# [Project name]
+# ClearProxy
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A browser-in-browser web proxy. Enter any URL in the address bar and browse through the proxy server. Tracks history and lets you save bookmarks.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/api-server run dev` — run the API server (port 8080)
+- `pnpm --filter @workspace/web-proxy run dev` — run the frontend (port 21325)
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
@@ -19,18 +20,32 @@ _Replace the heading above with the project's name, and this line with one sente
 - Validation: Zod (`zod/v4`), `drizzle-zod`
 - API codegen: Orval (from OpenAPI spec)
 - Build: esbuild (CJS bundle)
+- Frontend: React + Vite + Tailwind + shadcn/ui
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `lib/api-spec/openapi.yaml` — API contract (source of truth)
+- `lib/db/src/schema/` — Drizzle schema (history.ts, bookmarks.ts)
+- `artifacts/api-server/src/routes/proxy.ts` — core proxy logic (HTML rewriting, header forwarding)
+- `artifacts/api-server/src/routes/history.ts` — history CRUD
+- `artifacts/api-server/src/routes/bookmarks.ts` — bookmarks CRUD
+- `artifacts/web-proxy/src/` — React frontend
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Proxy runs entirely server-side: the backend fetches the target URL with real browser headers, rewrites all href/src/action/CSS url() attributes to route through `/api/proxy?url=<encoded>`, and returns modified HTML.
+- A small injected script in every proxied HTML page sends `postMessage` to the parent frame on navigation, so the address bar stays in sync.
+- History and bookmarks stored in PostgreSQL via Drizzle ORM.
+- Cookies forwarded via custom `X-Proxy-Cookie` / `X-Proxy-Set-Cookie` headers to work around cross-origin browser restrictions.
+- `node-html-parser` used for HTML rewriting (fast, no DOM dependency).
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Browse any website through the proxy by typing a URL
+- Back/forward/refresh browser controls
+- Bookmark any page with one click
+- Side panel shows full browsing history and bookmarks
+- History auto-clears button, bookmark delete actions
 
 ## User preferences
 
@@ -38,7 +53,9 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Some sites with heavy bot detection (Cloudflare, etc.) may still block access since the proxy IP is a server, not a residential IP.
+- JavaScript-heavy SPAs may not proxy perfectly — static and SSR sites work best.
+- After each OpenAPI spec change, re-run codegen: `pnpm --filter @workspace/api-spec run codegen`
 
 ## Pointers
 
