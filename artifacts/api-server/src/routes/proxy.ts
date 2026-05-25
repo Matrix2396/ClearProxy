@@ -74,6 +74,18 @@ function buildInjectedScript(pageUrl: string): string {
   var __PX_URL__ = ${JSON.stringify(pageUrl)};
   var __PX_BASE__ = ${JSON.stringify(PROXY_PATH)};
 
+  // Save real parent BEFORE any overrides so postMessage still works
+  var _realParent = window.parent;
+
+  // ── Iframe detection bypass ──────────────────────────────────────────
+  // Many sites refuse to render inside iframes. We override these so the
+  // page believes it is the top-level window.
+  try { Object.defineProperty(window, 'self',        { get: function() { return window; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(window, 'top',         { get: function() { return window; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(window, 'frameElement',{ get: function() { return null;   }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(window, 'parent',      { get: function() { return window; }, configurable: true }); } catch(e) {}
+
+  // ── URL helpers ──────────────────────────────────────────────────────
   function toProxyUrl(url) {
     if (!url || typeof url !== 'string') return url;
     try {
@@ -81,6 +93,14 @@ function buildInjectedScript(pageUrl: string): string {
       if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') || url.startsWith('#')) return url;
       var abs = new URL(url, __PX_URL__).href;
       return __PX_BASE__ + '?url=' + encodeURIComponent(abs);
+    } catch(e) { return url; }
+  }
+
+  function toWsProxyUrl(url) {
+    try {
+      var abs = new URL(url, __PX_URL__).href;
+      var wsBase = location.origin.replace(/^http/, 'ws') + '/api/ws-proxy';
+      return wsBase + '?url=' + encodeURIComponent(abs);
     } catch(e) { return url; }
   }
 
@@ -92,7 +112,7 @@ function buildInjectedScript(pageUrl: string): string {
     } catch(e) { return href; }
   }
 
-  // Only notify parent when the URL actually changes — prevents replaceState/pushState spam
+  // ── Parent notifications (debounced, deduplicated) ───────────────────
   var _lastNotifyUrl = '';
   var _notifyTimer = 0;
   function notify(url, title) {
@@ -100,13 +120,12 @@ function buildInjectedScript(pageUrl: string): string {
     _lastNotifyUrl = url;
     clearTimeout(_notifyTimer);
     _notifyTimer = setTimeout(function() {
-      try { window.parent.postMessage({ type: 'proxy-navigate', url: url, title: title || document.title }, '*'); } catch(e) {}
-    }, 150); // small debounce so rapid pushState bursts send one message
+      try { _realParent.postMessage({ type: 'proxy-navigate', url: url, title: title || document.title }, '*'); } catch(e) {}
+    }, 150);
   }
 
   window.addEventListener('load', function() { notify(__PX_URL__, document.title); });
 
-  // Intercept pushState / replaceState
   var _push = history.pushState.bind(history);
   var _replace = history.replaceState.bind(history);
   history.pushState = function(s, t, url) {
@@ -121,7 +140,7 @@ function buildInjectedScript(pageUrl: string): string {
   };
   window.addEventListener('popstate', function() { notify(extractOriginalUrl(location.href), document.title); });
 
-  // Intercept fetch
+  // ── Intercept fetch ──────────────────────────────────────────────────
   var _fetch = window.fetch;
   window.fetch = function(input, init) {
     try {
@@ -131,14 +150,30 @@ function buildInjectedScript(pageUrl: string): string {
     return _fetch.apply(window, [input, init]);
   };
 
-  // Intercept XMLHttpRequest
+  // ── Intercept XMLHttpRequest ─────────────────────────────────────────
   var _open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url, async, user, pass) {
     try { url = toProxyUrl(String(url)); } catch(e) {}
     return _open.call(this, method, url, async !== false, user, pass);
   };
 
-  // Intercept window.open
+  // ── Intercept WebSocket ──────────────────────────────────────────────
+  // Routes WebSocket connections through our server-side WS proxy so
+  // real-time apps (chess.com game board, etc.) work correctly.
+  var _OrigWS = window.WebSocket;
+  function ProxiedWebSocket(url, protocols) {
+    var proxyUrl;
+    try { proxyUrl = toWsProxyUrl(String(url)); } catch(e) { proxyUrl = url; }
+    return protocols !== undefined ? new _OrigWS(proxyUrl, protocols) : new _OrigWS(proxyUrl);
+  }
+  ProxiedWebSocket.prototype = _OrigWS.prototype;
+  ProxiedWebSocket.CONNECTING = _OrigWS.CONNECTING;
+  ProxiedWebSocket.OPEN       = _OrigWS.OPEN;
+  ProxiedWebSocket.CLOSING    = _OrigWS.CLOSING;
+  ProxiedWebSocket.CLOSED     = _OrigWS.CLOSED;
+  try { window.WebSocket = ProxiedWebSocket; } catch(e) {}
+
+  // ── Intercept window.open ────────────────────────────────────────────
   var _winOpen = window.open;
   window.open = function(url, target, features) {
     try { if (url) url = toProxyUrl(String(url)); } catch(e) {}

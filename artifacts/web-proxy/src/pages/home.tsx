@@ -11,6 +11,7 @@ import {
   PanelRight,
   ShieldAlert,
   Shield,
+  Globe,
 } from "lucide-react";
 import {
   useListHistory,
@@ -42,23 +43,27 @@ function proxyHref(original: string) {
   return `/api/proxy?url=${encodeURIComponent(original)}`;
 }
 
+const QUICK_LINKS = [
+  { label: "Wikipedia", url: "https://wikipedia.org" },
+  { label: "Reddit", url: "https://reddit.com" },
+  { label: "GitHub", url: "https://github.com" },
+  { label: "HN", url: "https://news.ycombinator.com" },
+  { label: "Chess.com", url: "https://chess.com" },
+];
+
 export default function Home() {
-  // Address bar text (mirrors what user types or what page reports)
   const [urlInput, setUrlInput] = useState("");
-  // The URL actually loaded in the proxy (drives iframe src)
   const [iframeSrc, setIframeSrc] = useState("");
-  // Display URL shown as "current page" for bookmarks/icon
   const [displayUrl, setDisplayUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
 
-  // Back/forward stack — tracks original URLs in order visited
   const navStack = useRef<string[]>([]);
   const navPos = useRef(-1);
   const [canBack, setCanBack] = useState(false);
   const [canForward, setCanForward] = useState(false);
 
-  // Deduplicate history writes
   const lastHistoryUrl = useRef("");
   const lastHistoryTime = useRef(0);
 
@@ -72,13 +77,11 @@ export default function Home() {
   const createBookmark = useCreateBookmark();
   const deleteBookmark = useDeleteBookmark();
 
-  // Update nav button state
   const syncNavButtons = useCallback(() => {
     setCanBack(navPos.current > 0);
     setCanForward(navPos.current < navStack.current.length - 1);
   }, []);
 
-  // Record a history entry, deduplicated (same URL within 3 s is ignored)
   const recordHistory = useCallback(
     (url: string, title?: string) => {
       const now = Date.now();
@@ -96,19 +99,15 @@ export default function Home() {
     [queryClient]
   );
 
-  // Actually navigate the iframe to a URL, updating all state
   const navigateTo = useCallback(
     (original: string, addToStack = true) => {
       const full = ensureProtocol(original);
       if (!full) return;
-
       setUrlInput(full);
       setDisplayUrl(full);
       setIframeSrc(proxyHref(full));
       setIsLoading(true);
-
       if (addToStack) {
-        // Trim forward history
         navStack.current = navStack.current.slice(0, navPos.current + 1);
         navStack.current.push(full);
         navPos.current = navStack.current.length - 1;
@@ -118,21 +117,14 @@ export default function Home() {
     [syncNavButtons]
   );
 
-  // Listen for postMessage from the proxied iframe (direct child only)
   useEffect(() => {
     function onMessage(e: MessageEvent) {
-      // Only accept from our direct iframe child — prevents sub-iframe floods
       if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return;
       if (!e.data || e.data.type !== "proxy-navigate") return;
-
       const { url, title } = e.data as { type: string; url: string; title?: string };
       if (!url) return;
-
-      // Update address bar without remounting the iframe
       setUrlInput(url);
       setDisplayUrl(url);
-
-      // Track in nav stack if URL changed
       const current = navStack.current[navPos.current];
       if (url !== current) {
         navStack.current = navStack.current.slice(0, navPos.current + 1);
@@ -140,10 +132,8 @@ export default function Home() {
         navPos.current = navStack.current.length - 1;
         syncNavButtons();
       }
-
       recordHistory(url, title);
     }
-
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [recordHistory, syncNavButtons]);
@@ -178,14 +168,12 @@ export default function Home() {
   const handleRefresh = () => {
     if (!iframeSrc) return;
     setIsLoading(true);
-    // Force reload by toggling src
+    const src = iframeSrc;
     setIframeSrc("");
-    requestAnimationFrame(() => setIframeSrc(iframeSrc));
+    requestAnimationFrame(() => setIframeSrc(src));
   };
 
-  const handleIframeLoad = () => {
-    setIsLoading(false);
-  };
+  const handleIframeLoad = () => setIsLoading(false);
 
   const isBookmarked = bookmarks.some((b) => b.url === displayUrl);
 
@@ -221,51 +209,35 @@ export default function Home() {
 
   return (
     <div className="flex flex-col h-screen w-full bg-background text-foreground overflow-hidden font-mono">
-      {/* Browser Chrome */}
-      <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border bg-card shrink-0">
-        {/* Nav controls */}
+      {/* ── Browser chrome ─────────────────────────────────────────────── */}
+      <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border bg-card shrink-0 relative">
+        {/* Subtle cyan top-border glow when a page is loaded */}
+        {hasPage && (
+          <div className="absolute top-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-primary/60 to-transparent" />
+        )}
+
         <div className="flex items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-30"
-            onClick={handleBack}
-            disabled={!canBack}
-            data-testid="button-back"
-          >
+          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-25 transition-all"
+            onClick={handleBack} disabled={!canBack} data-testid="button-back">
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-30"
-            onClick={handleForward}
-            disabled={!canForward}
-            data-testid="button-forward"
-          >
+          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-25 transition-all"
+            onClick={handleForward} disabled={!canForward} data-testid="button-forward">
             <ChevronRight className="h-4 w-4" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-30"
-            onClick={handleRefresh}
-            disabled={!hasPage}
-            data-testid="button-refresh"
-          >
-            <RotateCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
+          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-25 transition-all"
+            onClick={handleRefresh} disabled={!hasPage} data-testid="button-refresh">
+            <RotateCw className={`h-4 w-4 transition-transform ${isLoading ? "animate-spin" : ""}`} />
           </Button>
         </div>
 
         {/* Address bar */}
         <form onSubmit={handleSubmit} className="flex-1 flex items-center relative">
-          <span className="absolute left-3 text-muted-foreground pointer-events-none">
+          <span className="absolute left-3 text-muted-foreground pointer-events-none transition-colors">
             {hasPage ? (
-              isHttps ? (
-                <Shield className="h-3.5 w-3.5 text-emerald-500" />
-              ) : (
-                <ShieldAlert className="h-3.5 w-3.5 text-yellow-500" />
-              )
+              isHttps
+                ? <Shield className="h-3.5 w-3.5 text-emerald-400" />
+                : <ShieldAlert className="h-3.5 w-3.5 text-yellow-400" />
             ) : (
               <Search className="h-3.5 w-3.5" />
             )}
@@ -273,38 +245,36 @@ export default function Home() {
           <Input
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
-            onFocus={(e) => e.target.select()}
+            onFocus={(e) => { e.target.select(); setInputFocused(true); }}
+            onBlur={() => setInputFocused(false)}
             placeholder="Enter a URL"
-            className="w-full pl-9 pr-9 h-9 bg-secondary border-transparent focus-visible:border-primary focus-visible:ring-0 text-sm"
+            className={`w-full pl-9 pr-9 h-9 bg-secondary border transition-all text-sm ${
+              inputFocused
+                ? "border-primary/60 shadow-[0_0_0_2px_hsl(180_100%_50%/0.12)]"
+                : "border-transparent"
+            }`}
             data-testid="input-url"
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
           />
           {hasPage && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="absolute right-1 h-7 w-7 text-muted-foreground hover:text-primary transition-colors"
-              onClick={toggleBookmark}
-              data-testid="button-bookmark"
-              title={isBookmarked ? "Remove bookmark" : "Add bookmark"}
-            >
-              <Star className={`h-3.5 w-3.5 ${isBookmarked ? "fill-primary text-primary" : ""}`} />
+            <Button type="button" variant="ghost" size="icon"
+              className={`absolute right-1 h-7 w-7 transition-all ${
+                isBookmarked ? "text-primary" : "text-muted-foreground hover:text-primary"
+              }`}
+              onClick={toggleBookmark} data-testid="button-bookmark"
+              title={isBookmarked ? "Remove bookmark" : "Add bookmark"}>
+              <Star className={`h-3.5 w-3.5 transition-all ${isBookmarked ? "fill-primary scale-110" : ""}`} />
             </Button>
           )}
         </form>
 
-        {/* Sidebar toggle */}
         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
           <SheetTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground shrink-0"
-              data-testid="button-sidebar"
-            >
+            <Button variant="ghost" size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground shrink-0 transition-colors"
+              data-testid="button-sidebar">
               <PanelRight className="h-4 w-4" />
             </Button>
           </SheetTrigger>
@@ -312,35 +282,22 @@ export default function Home() {
           <SheetContent side="right" className="w-80 p-0 border-l border-border bg-card flex flex-col">
             <Tabs defaultValue="history" className="flex flex-col h-full">
               <TabsList className="w-full rounded-none border-b border-border bg-transparent p-0 h-11 shrink-0">
-                <TabsTrigger
-                  value="history"
-                  className="flex-1 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none h-full text-xs uppercase tracking-wider font-semibold"
-                >
-                  <History className="h-3.5 w-3.5 mr-2" />
-                  History
+                <TabsTrigger value="history"
+                  className="flex-1 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none h-full text-xs uppercase tracking-wider font-semibold transition-colors">
+                  <History className="h-3.5 w-3.5 mr-2" />History
                 </TabsTrigger>
-                <TabsTrigger
-                  value="bookmarks"
-                  className="flex-1 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none h-full text-xs uppercase tracking-wider font-semibold"
-                >
-                  <BookmarkIcon className="h-3.5 w-3.5 mr-2" />
-                  Bookmarks
+                <TabsTrigger value="bookmarks"
+                  className="flex-1 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none h-full text-xs uppercase tracking-wider font-semibold transition-colors">
+                  <BookmarkIcon className="h-3.5 w-3.5 mr-2" />Bookmarks
                 </TabsTrigger>
               </TabsList>
 
-              {/* History tab */}
               <TabsContent value="history" className="flex-1 overflow-hidden m-0 flex flex-col min-h-0">
                 <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
                   <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Recent</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleClearHistory}
+                  <Button variant="ghost" size="sm" onClick={handleClearHistory}
                     className="h-6 text-[10px] text-destructive hover:text-destructive hover:bg-destructive/10 px-2"
-                    data-testid="button-clear-history"
-                  >
-                    Clear all
-                  </Button>
+                    data-testid="button-clear-history">Clear all</Button>
                 </div>
                 <ScrollArea className="flex-1">
                   {history.length === 0 ? (
@@ -351,25 +308,19 @@ export default function Home() {
                   ) : (
                     <div className="divide-y divide-border">
                       {history.map((entry) => (
-                        <button
-                          key={entry.id}
-                          className="w-full text-left p-3 hover:bg-secondary/60 flex items-start gap-3 transition-colors"
+                        <button key={entry.id}
+                          className="w-full text-left p-3 hover:bg-secondary/60 flex items-start gap-3 transition-colors group"
                           onClick={() => { navigateTo(entry.url); setSidebarOpen(false); }}
-                          data-testid={`history-entry-${entry.id}`}
-                        >
-                          <div className="h-7 w-7 bg-secondary rounded flex items-center justify-center shrink-0 mt-0.5">
-                            {entry.favicon ? (
-                              <img src={entry.favicon} alt="" className="h-4 w-4" />
-                            ) : (
-                              <History className="h-3.5 w-3.5 text-muted-foreground" />
-                            )}
+                          data-testid={`history-entry-${entry.id}`}>
+                          <div className="h-7 w-7 bg-secondary rounded flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-accent transition-colors">
+                            {entry.favicon
+                              ? <img src={entry.favicon} alt="" className="h-4 w-4" />
+                              : <Globe className="h-3.5 w-3.5 text-muted-foreground" />}
                           </div>
                           <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium truncate leading-tight">{entry.title || entry.url}</p>
+                            <p className="text-sm font-medium truncate leading-tight group-hover:text-primary transition-colors">{entry.title || entry.url}</p>
                             <p className="text-[11px] text-muted-foreground truncate mt-0.5">{entry.url}</p>
-                            <p className="text-[10px] text-muted-foreground/50 mt-1">
-                              {format(new Date(entry.visitedAt), "MMM d, h:mm a")}
-                            </p>
+                            <p className="text-[10px] text-muted-foreground/50 mt-1">{format(new Date(entry.visitedAt), "MMM d, h:mm a")}</p>
                           </div>
                         </button>
                       ))}
@@ -378,7 +329,6 @@ export default function Home() {
                 </ScrollArea>
               </TabsContent>
 
-              {/* Bookmarks tab */}
               <TabsContent value="bookmarks" className="flex-1 overflow-hidden m-0 flex flex-col min-h-0">
                 <div className="flex items-center px-4 py-2 border-b border-border shrink-0">
                   <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Saved</span>
@@ -392,40 +342,28 @@ export default function Home() {
                   ) : (
                     <div className="divide-y divide-border">
                       {bookmarks.map((bookmark) => (
-                        <div
-                          key={bookmark.id}
+                        <div key={bookmark.id}
                           className="flex items-center gap-3 p-3 hover:bg-secondary/60 group transition-colors"
-                          data-testid={`bookmark-entry-${bookmark.id}`}
-                        >
-                          <button
-                            className="h-7 w-7 bg-secondary rounded flex items-center justify-center shrink-0"
-                            onClick={() => { navigateTo(bookmark.url); setSidebarOpen(false); }}
-                          >
-                            {bookmark.favicon ? (
-                              <img src={bookmark.favicon} alt="" className="h-4 w-4" />
-                            ) : (
-                              <Star className="h-3.5 w-3.5 text-muted-foreground" />
-                            )}
+                          data-testid={`bookmark-entry-${bookmark.id}`}>
+                          <button className="h-7 w-7 bg-secondary rounded flex items-center justify-center shrink-0 group-hover:bg-accent transition-colors"
+                            onClick={() => { navigateTo(bookmark.url); setSidebarOpen(false); }}>
+                            {bookmark.favicon
+                              ? <img src={bookmark.favicon} alt="" className="h-4 w-4" />
+                              : <Star className="h-3.5 w-3.5 text-muted-foreground" />}
                           </button>
-                          <button
-                            className="flex-1 min-w-0 text-left"
-                            onClick={() => { navigateTo(bookmark.url); setSidebarOpen(false); }}
-                          >
-                            <p className="text-sm font-medium truncate">{bookmark.title || bookmark.url}</p>
+                          <button className="flex-1 min-w-0 text-left"
+                            onClick={() => { navigateTo(bookmark.url); setSidebarOpen(false); }}>
+                            <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">{bookmark.title || bookmark.url}</p>
                             <p className="text-[11px] text-muted-foreground truncate mt-0.5">{bookmark.url}</p>
                           </button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
+                          <Button variant="ghost" size="icon"
                             className="h-7 w-7 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-all shrink-0"
                             onClick={(e) => {
                               e.stopPropagation();
-                              deleteBookmark.mutate(
-                                { id: bookmark.id },
-                                { onSuccess: () => queryClient.invalidateQueries({ queryKey: getListBookmarksQueryKey() }) }
-                              );
-                            }}
-                          >
+                              deleteBookmark.mutate({ id: bookmark.id }, {
+                                onSuccess: () => queryClient.invalidateQueries({ queryKey: getListBookmarksQueryKey() }),
+                              });
+                            }}>
                             <X className="h-3.5 w-3.5" />
                           </Button>
                         </div>
@@ -439,42 +377,63 @@ export default function Home() {
         </Sheet>
       </div>
 
-      {/* Loading bar */}
-      {isLoading && (
-        <div className="h-[2px] bg-secondary shrink-0 overflow-hidden">
-          <div className="h-full bg-primary" style={{ animation: "proxyProgress 1.4s ease-in-out infinite" }} />
-        </div>
-      )}
+      {/* ── Loading bar ─────────────────────────────────────────────────── */}
+      <div className={`h-[2px] shrink-0 overflow-hidden transition-opacity duration-300 ${isLoading ? "opacity-100" : "opacity-0"}`}>
+        <div className="h-full bg-gradient-to-r from-transparent via-primary to-transparent"
+          style={{ animation: "proxyProgress 1.4s ease-in-out infinite" }} />
+      </div>
 
-      {/* Main content */}
-      <div className="flex-1 relative overflow-hidden bg-black">
+      {/* ── Main content ─────────────────────────────────────────────────── */}
+      <div className="flex-1 relative overflow-hidden">
         {/* Empty state */}
         {!hasPage && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-muted-foreground select-none">
-            <ShieldAlert className="h-14 w-14 opacity-10" />
-            <div className="text-center">
-              <h1 className="text-xl font-bold tracking-tight text-foreground/60 mb-1">ClearProxy</h1>
-              <p className="text-sm text-muted-foreground/60">Enter a URL above to begin browsing</p>
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-5 select-none overflow-hidden">
+            {/* Animated grid background */}
+            <div className="absolute inset-0 opacity-[0.035]"
+              style={{ backgroundImage: "linear-gradient(hsl(180 100% 50%) 1px,transparent 1px),linear-gradient(90deg,hsl(180 100% 50%) 1px,transparent 1px)", backgroundSize: "48px 48px" }} />
+            {/* Radial gradient fade over grid */}
+            <div className="absolute inset-0" style={{ background: "radial-gradient(ellipse 60% 60% at 50% 50%, transparent 20%, hsl(240 10% 4%) 80%)" }} />
+
+            {/* Shield icon with pulse ring */}
+            <div className="relative z-10">
+              <div className="absolute inset-0 rounded-full animate-ping opacity-20"
+                style={{ background: "radial-gradient(circle, hsl(180 100% 50%) 0%, transparent 70%)", transform: "scale(1.8)" }} />
+              <div className="relative h-16 w-16 flex items-center justify-center rounded-full"
+                style={{ background: "radial-gradient(circle, hsl(180 100% 50% / 0.15) 0%, transparent 70%)" }}>
+                <Shield className="h-10 w-10" style={{ color: "hsl(180 100% 50%)", filter: "drop-shadow(0 0 12px hsl(180 100% 50% / 0.6))" }} />
+              </div>
             </div>
-            <div className="flex flex-wrap gap-2 justify-center mt-4 max-w-sm">
-              {["wikipedia.org", "reddit.com", "github.com", "news.ycombinator.com"].map((site) => (
+
+            {/* Title */}
+            <div className="text-center z-10">
+              <h1 className="text-2xl font-bold tracking-tight mb-1.5"
+                style={{ color: "hsl(0 0% 95%)", textShadow: "0 0 24px hsl(180 100% 50% / 0.3)" }}>
+                ClearProxy
+              </h1>
+              <p className="text-sm text-muted-foreground/70">Browse freely. Leave no trace.</p>
+            </div>
+
+            {/* Quick links */}
+            <div className="flex flex-wrap gap-2 justify-center z-10 max-w-sm mt-1">
+              {QUICK_LINKS.map((link, i) => (
                 <button
-                  key={site}
-                  onClick={() => navigateTo(`https://${site}`)}
-                  className="px-3 py-1.5 text-xs bg-secondary hover:bg-accent text-muted-foreground hover:text-foreground transition-colors border border-border"
-                >
-                  {site}
+                  key={link.url}
+                  onClick={() => navigateTo(link.url)}
+                  className="px-3 py-1.5 text-xs font-mono border border-border/60 text-muted-foreground hover:text-primary hover:border-primary/50 hover:bg-primary/5 transition-all duration-200"
+                  style={{ animationDelay: `${i * 60}ms` }}
+                  data-testid={`quick-link-${link.label.toLowerCase()}`}>
+                  {link.label}
                 </button>
               ))}
             </div>
           </div>
         )}
 
-        {/* Proxy iframe — no key prop, src drives navigation without remounting */}
+        {/* Proxy iframe */}
         <iframe
           ref={iframeRef}
           src={iframeSrc || undefined}
-          className={`w-full h-full border-none block bg-white ${hasPage ? "visible" : "invisible"}`}
+          className={`w-full h-full border-none block bg-white transition-opacity duration-300 ${hasPage ? "opacity-100" : "opacity-0 pointer-events-none"}`}
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
           onLoad={handleIframeLoad}
           title="Proxy View"
@@ -485,9 +444,9 @@ export default function Home() {
       <style dangerouslySetInnerHTML={{
         __html: `
           @keyframes proxyProgress {
-            0%   { width: 0%;   margin-left: 0%; }
-            50%  { width: 60%;  margin-left: 20%; }
-            100% { width: 0%;   margin-left: 100%; }
+            0%   { width: 0%;  margin-left: 0%; }
+            50%  { width: 60%; margin-left: 20%; }
+            100% { width: 0%;  margin-left: 100%; }
           }
         `,
       }} />

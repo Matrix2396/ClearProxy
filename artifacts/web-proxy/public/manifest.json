@@ -1,0 +1,17 @@
+{
+  "name": "ClearProxy",
+  "short_name": "ClearProxy",
+  "description": "Browse any website through a clean, fast proxy.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a14",
+  "theme_color": "#00ffff",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
