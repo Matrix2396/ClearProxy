@@ -92,8 +92,16 @@ function buildInjectedScript(pageUrl: string): string {
     } catch(e) { return href; }
   }
 
+  // Only notify parent when the URL actually changes — prevents replaceState/pushState spam
+  var _lastNotifyUrl = '';
+  var _notifyTimer = 0;
   function notify(url, title) {
-    try { window.parent.postMessage({ type: 'proxy-navigate', url: url, title: title || document.title }, '*'); } catch(e) {}
+    if (!url || url === _lastNotifyUrl) return;
+    _lastNotifyUrl = url;
+    clearTimeout(_notifyTimer);
+    _notifyTimer = setTimeout(function() {
+      try { window.parent.postMessage({ type: 'proxy-navigate', url: url, title: title || document.title }, '*'); } catch(e) {}
+    }, 150); // small debounce so rapid pushState bursts send one message
   }
 
   window.addEventListener('load', function() { notify(__PX_URL__, document.title); });

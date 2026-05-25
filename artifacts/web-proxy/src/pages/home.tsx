@@ -32,30 +32,35 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 
 function ensureProtocol(url: string): string {
-  if (!url.trim()) return "";
-  if (/^https?:\/\//i.test(url)) return url;
-  return `https://${url}`;
+  const trimmed = url.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
 }
 
-function extractOriginalFromProxyUrl(href: string): string {
-  try {
-    const u = new URL(href, window.location.href);
-    const param = u.searchParams.get("url");
-    return param || href;
-  } catch {
-    return href;
-  }
+function proxyHref(original: string) {
+  return `/api/proxy?url=${encodeURIComponent(original)}`;
 }
 
 export default function Home() {
+  // Address bar text (mirrors what user types or what page reports)
   const [urlInput, setUrlInput] = useState("");
-  const [currentUrl, setCurrentUrl] = useState("");
+  // The URL actually loaded in the proxy (drives iframe src)
+  const [iframeSrc, setIframeSrc] = useState("");
+  // Display URL shown as "current page" for bookmarks/icon
+  const [displayUrl, setDisplayUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Back/forward nav stack: list of visited original URLs, current index
-  const [navStack, setNavStack] = useState<string[]>([]);
-  const [navIndex, setNavIndex] = useState(-1);
+  // Back/forward stack — tracks original URLs in order visited
+  const navStack = useRef<string[]>([]);
+  const navPos = useRef(-1);
+  const [canBack, setCanBack] = useState(false);
+  const [canForward, setCanForward] = useState(false);
+
+  // Deduplicate history writes
+  const lastHistoryUrl = useRef("");
+  const lastHistoryTime = useRef(0);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const { toast } = useToast();
@@ -63,111 +68,140 @@ export default function Home() {
 
   const { data: history = [] } = useListHistory();
   const { data: bookmarks = [] } = useListBookmarks();
-
   const clearHistory = useClearHistory();
   const createBookmark = useCreateBookmark();
   const deleteBookmark = useDeleteBookmark();
 
-  // Listen for postMessage from the proxied iframe
-  useEffect(() => {
-    function handleMessage(e: MessageEvent) {
-      if (!e.data || e.data.type !== "proxy-navigate") return;
-      const { url, title } = e.data as { type: string; url: string; title?: string };
-      if (!url) return;
+  // Update nav button state
+  const syncNavButtons = useCallback(() => {
+    setCanBack(navPos.current > 0);
+    setCanForward(navPos.current < navStack.current.length - 1);
+  }, []);
 
-      // Update address bar with the ORIGINAL url
-      const original = url.startsWith("/api/proxy") ? extractOriginalFromProxyUrl(url) : url;
-      setUrlInput(original);
-      setCurrentUrl(original);
-      setIsLoading(false);
-
-      // Record history
+  // Record a history entry, deduplicated (same URL within 3 s is ignored)
+  const recordHistory = useCallback(
+    (url: string, title?: string) => {
+      const now = Date.now();
+      if (url === lastHistoryUrl.current && now - lastHistoryTime.current < 3000) return;
+      lastHistoryUrl.current = url;
+      lastHistoryTime.current = now;
       fetch("/api/history", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: original, title: title || null }),
+        body: JSON.stringify({ url, title: title || null }),
       })
         .then(() => queryClient.invalidateQueries({ queryKey: getListHistoryQueryKey() }))
         .catch(() => {});
-    }
+    },
+    [queryClient]
+  );
 
-    window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
-  }, [queryClient]);
-
-  const loadUrl = useCallback(
-    (url: string, pushToStack = true) => {
-      const full = ensureProtocol(url);
+  // Actually navigate the iframe to a URL, updating all state
+  const navigateTo = useCallback(
+    (original: string, addToStack = true) => {
+      const full = ensureProtocol(original);
       if (!full) return;
+
       setUrlInput(full);
-      setCurrentUrl(full);
+      setDisplayUrl(full);
+      setIframeSrc(proxyHref(full));
       setIsLoading(true);
 
-      if (pushToStack) {
-        setNavStack((prev) => {
-          const trimmed = prev.slice(0, navIndex + 1);
-          return [...trimmed, full];
-        });
-        setNavIndex((prev) => prev + 1);
+      if (addToStack) {
+        // Trim forward history
+        navStack.current = navStack.current.slice(0, navPos.current + 1);
+        navStack.current.push(full);
+        navPos.current = navStack.current.length - 1;
+        syncNavButtons();
       }
     },
-    [navIndex]
+    [syncNavButtons]
   );
+
+  // Listen for postMessage from the proxied iframe (direct child only)
+  useEffect(() => {
+    function onMessage(e: MessageEvent) {
+      // Only accept from our direct iframe child — prevents sub-iframe floods
+      if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return;
+      if (!e.data || e.data.type !== "proxy-navigate") return;
+
+      const { url, title } = e.data as { type: string; url: string; title?: string };
+      if (!url) return;
+
+      // Update address bar without remounting the iframe
+      setUrlInput(url);
+      setDisplayUrl(url);
+
+      // Track in nav stack if URL changed
+      const current = navStack.current[navPos.current];
+      if (url !== current) {
+        navStack.current = navStack.current.slice(0, navPos.current + 1);
+        navStack.current.push(url);
+        navPos.current = navStack.current.length - 1;
+        syncNavButtons();
+      }
+
+      recordHistory(url, title);
+    }
+
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [recordHistory, syncNavButtons]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    loadUrl(urlInput);
+    navigateTo(urlInput);
   };
 
   const handleBack = () => {
-    if (navIndex <= 0) return;
-    const newIndex = navIndex - 1;
-    setNavIndex(newIndex);
-    const url = navStack[newIndex];
+    if (navPos.current <= 0) return;
+    navPos.current -= 1;
+    const url = navStack.current[navPos.current];
+    syncNavButtons();
     setUrlInput(url);
-    setCurrentUrl(url);
+    setDisplayUrl(url);
+    setIframeSrc(proxyHref(url));
     setIsLoading(true);
   };
 
   const handleForward = () => {
-    if (navIndex >= navStack.length - 1) return;
-    const newIndex = navIndex + 1;
-    setNavIndex(newIndex);
-    const url = navStack[newIndex];
+    if (navPos.current >= navStack.current.length - 1) return;
+    navPos.current += 1;
+    const url = navStack.current[navPos.current];
+    syncNavButtons();
     setUrlInput(url);
-    setCurrentUrl(url);
+    setDisplayUrl(url);
+    setIframeSrc(proxyHref(url));
     setIsLoading(true);
   };
 
   const handleRefresh = () => {
-    if (!iframeRef.current || !currentUrl) return;
+    if (!iframeSrc) return;
     setIsLoading(true);
-    const src = iframeRef.current.src;
-    iframeRef.current.src = "about:blank";
-    requestAnimationFrame(() => {
-      if (iframeRef.current) iframeRef.current.src = src;
-    });
+    // Force reload by toggling src
+    setIframeSrc("");
+    requestAnimationFrame(() => setIframeSrc(iframeSrc));
   };
 
   const handleIframeLoad = () => {
     setIsLoading(false);
   };
 
-  const isBookmarked = bookmarks.some((b) => b.url === currentUrl);
+  const isBookmarked = bookmarks.some((b) => b.url === displayUrl);
 
   const toggleBookmark = () => {
-    if (!currentUrl) return;
+    if (!displayUrl) return;
     if (isBookmarked) {
-      const bookmark = bookmarks.find((b) => b.url === currentUrl);
-      if (bookmark) {
+      const bm = bookmarks.find((b) => b.url === displayUrl);
+      if (bm) {
         deleteBookmark.mutate(
-          { id: bookmark.id },
+          { id: bm.id },
           { onSuccess: () => queryClient.invalidateQueries({ queryKey: getListBookmarksQueryKey() }) }
         );
       }
     } else {
       createBookmark.mutate(
-        { data: { url: currentUrl } },
+        { data: { url: displayUrl } },
         { onSuccess: () => queryClient.invalidateQueries({ queryKey: getListBookmarksQueryKey() }) }
       );
     }
@@ -182,9 +216,8 @@ export default function Home() {
     });
   };
 
-  const isHttps = currentUrl.startsWith("https://");
-  const canGoBack = navIndex > 0;
-  const canGoForward = navIndex < navStack.length - 1;
+  const isHttps = displayUrl.startsWith("https://");
+  const hasPage = !!iframeSrc;
 
   return (
     <div className="flex flex-col h-screen w-full bg-background text-foreground overflow-hidden font-mono">
@@ -197,7 +230,7 @@ export default function Home() {
             size="icon"
             className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-30"
             onClick={handleBack}
-            disabled={!canGoBack}
+            disabled={!canBack}
             data-testid="button-back"
           >
             <ChevronLeft className="h-4 w-4" />
@@ -207,7 +240,7 @@ export default function Home() {
             size="icon"
             className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-30"
             onClick={handleForward}
-            disabled={!canGoForward}
+            disabled={!canForward}
             data-testid="button-forward"
           >
             <ChevronRight className="h-4 w-4" />
@@ -217,7 +250,7 @@ export default function Home() {
             size="icon"
             className="h-8 w-8 text-muted-foreground hover:text-foreground disabled:opacity-30"
             onClick={handleRefresh}
-            disabled={!currentUrl}
+            disabled={!hasPage}
             data-testid="button-refresh"
           >
             <RotateCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
@@ -227,7 +260,7 @@ export default function Home() {
         {/* Address bar */}
         <form onSubmit={handleSubmit} className="flex-1 flex items-center relative">
           <span className="absolute left-3 text-muted-foreground pointer-events-none">
-            {currentUrl ? (
+            {hasPage ? (
               isHttps ? (
                 <Shield className="h-3.5 w-3.5 text-emerald-500" />
               ) : (
@@ -240,14 +273,15 @@ export default function Home() {
           <Input
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
-            placeholder="Enter a URL or search"
+            onFocus={(e) => e.target.select()}
+            placeholder="Enter a URL"
             className="w-full pl-9 pr-9 h-9 bg-secondary border-transparent focus-visible:border-primary focus-visible:ring-0 text-sm"
             data-testid="input-url"
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
           />
-          {currentUrl && (
+          {hasPage && (
             <Button
               type="button"
               variant="ghost"
@@ -294,12 +328,10 @@ export default function Home() {
                 </TabsTrigger>
               </TabsList>
 
-              {/* History */}
+              {/* History tab */}
               <TabsContent value="history" className="flex-1 overflow-hidden m-0 flex flex-col min-h-0">
                 <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
-                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
-                    Recent
-                  </span>
+                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Recent</span>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -321,8 +353,8 @@ export default function Home() {
                       {history.map((entry) => (
                         <button
                           key={entry.id}
-                          className="w-full text-left p-3 hover:bg-secondary/60 flex items-start gap-3 transition-colors group"
-                          onClick={() => { loadUrl(entry.url); setSidebarOpen(false); }}
+                          className="w-full text-left p-3 hover:bg-secondary/60 flex items-start gap-3 transition-colors"
+                          onClick={() => { navigateTo(entry.url); setSidebarOpen(false); }}
                           data-testid={`history-entry-${entry.id}`}
                         >
                           <div className="h-7 w-7 bg-secondary rounded flex items-center justify-center shrink-0 mt-0.5">
@@ -346,7 +378,7 @@ export default function Home() {
                 </ScrollArea>
               </TabsContent>
 
-              {/* Bookmarks */}
+              {/* Bookmarks tab */}
               <TabsContent value="bookmarks" className="flex-1 overflow-hidden m-0 flex flex-col min-h-0">
                 <div className="flex items-center px-4 py-2 border-b border-border shrink-0">
                   <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Saved</span>
@@ -367,7 +399,7 @@ export default function Home() {
                         >
                           <button
                             className="h-7 w-7 bg-secondary rounded flex items-center justify-center shrink-0"
-                            onClick={() => { loadUrl(bookmark.url); setSidebarOpen(false); }}
+                            onClick={() => { navigateTo(bookmark.url); setSidebarOpen(false); }}
                           >
                             {bookmark.favicon ? (
                               <img src={bookmark.favicon} alt="" className="h-4 w-4" />
@@ -377,7 +409,7 @@ export default function Home() {
                           </button>
                           <button
                             className="flex-1 min-w-0 text-left"
-                            onClick={() => { loadUrl(bookmark.url); setSidebarOpen(false); }}
+                            onClick={() => { navigateTo(bookmark.url); setSidebarOpen(false); }}
                           >
                             <p className="text-sm font-medium truncate">{bookmark.title || bookmark.url}</p>
                             <p className="text-[11px] text-muted-foreground truncate mt-0.5">{bookmark.url}</p>
@@ -390,10 +422,7 @@ export default function Home() {
                               e.stopPropagation();
                               deleteBookmark.mutate(
                                 { id: bookmark.id },
-                                {
-                                  onSuccess: () =>
-                                    queryClient.invalidateQueries({ queryKey: getListBookmarksQueryKey() }),
-                                }
+                                { onSuccess: () => queryClient.invalidateQueries({ queryKey: getListBookmarksQueryKey() }) }
                               );
                             }}
                           >
@@ -411,27 +440,27 @@ export default function Home() {
       </div>
 
       {/* Loading bar */}
-      {isLoading && currentUrl && (
+      {isLoading && (
         <div className="h-[2px] bg-secondary shrink-0 overflow-hidden">
-          <div className="h-full bg-primary" style={{ animation: "proxyProgress 1.2s ease-in-out infinite" }} />
+          <div className="h-full bg-primary" style={{ animation: "proxyProgress 1.4s ease-in-out infinite" }} />
         </div>
       )}
 
       {/* Main content */}
-      <div className="flex-1 relative overflow-hidden">
-        {!currentUrl ? (
+      <div className="flex-1 relative overflow-hidden bg-black">
+        {/* Empty state */}
+        {!hasPage && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-muted-foreground select-none">
             <ShieldAlert className="h-14 w-14 opacity-10" />
             <div className="text-center">
               <h1 className="text-xl font-bold tracking-tight text-foreground/60 mb-1">ClearProxy</h1>
               <p className="text-sm text-muted-foreground/60">Enter a URL above to begin browsing</p>
             </div>
-            {/* Quick links */}
             <div className="flex flex-wrap gap-2 justify-center mt-4 max-w-sm">
               {["wikipedia.org", "reddit.com", "github.com", "news.ycombinator.com"].map((site) => (
                 <button
                   key={site}
-                  onClick={() => loadUrl(`https://${site}`)}
+                  onClick={() => navigateTo(`https://${site}`)}
                   className="px-3 py-1.5 text-xs bg-secondary hover:bg-accent text-muted-foreground hover:text-foreground transition-colors border border-border"
                 >
                   {site}
@@ -439,26 +468,26 @@ export default function Home() {
               ))}
             </div>
           </div>
-        ) : (
-          <iframe
-            ref={iframeRef}
-            key={currentUrl}
-            src={`/api/proxy?url=${encodeURIComponent(currentUrl)}`}
-            className="w-full h-full border-none block"
-            sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
-            onLoad={handleIframeLoad}
-            title="Proxy View"
-            data-testid="proxy-iframe"
-          />
         )}
+
+        {/* Proxy iframe — no key prop, src drives navigation without remounting */}
+        <iframe
+          ref={iframeRef}
+          src={iframeSrc || undefined}
+          className={`w-full h-full border-none block bg-white ${hasPage ? "visible" : "invisible"}`}
+          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
+          onLoad={handleIframeLoad}
+          title="Proxy View"
+          data-testid="proxy-iframe"
+        />
       </div>
 
       <style dangerouslySetInnerHTML={{
         __html: `
           @keyframes proxyProgress {
-            0%   { width: 0%; margin-left: 0%; }
-            50%  { width: 60%; margin-left: 20%; }
-            100% { width: 0%; margin-left: 100%; }
+            0%   { width: 0%;   margin-left: 0%; }
+            50%  { width: 60%;  margin-left: 20%; }
+            100% { width: 0%;   margin-left: 100%; }
           }
         `,
       }} />
