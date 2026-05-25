@@ -267,6 +267,18 @@ function rewriteHtml(html: string, pageUrl: string): string {
     }
   }
 
+  // Rewrite data-src on <script> tags — chess.com/Vite lazy-load scripts via
+  // data-src and then do `script.src = script.dataset.src` in JS. The browser's
+  // native src assignment bypasses our fetch override, so we must pre-rewrite
+  // the data-src value here so the JS ends up assigning a proxy URL.
+  for (const el of root.querySelectorAll("script[data-src]")) {
+    const dataSrc = el.getAttribute("data-src");
+    if (dataSrc) {
+      const abs = resolveUrl(pageUrl, dataSrc);
+      el.setAttribute("data-src", rewriteUrl(abs));
+    }
+  }
+
   // Rewrite action on forms
   for (const el of root.querySelectorAll("form[action]")) {
     const action = el.getAttribute("action");
@@ -291,6 +303,39 @@ function rewriteHtml(html: string, pageUrl: string): string {
   }
 
   return root.toString();
+}
+
+function rewriteJsImports(js: string, pageUrl: string): string {
+  let origin: string;
+  try { origin = new URL(pageUrl).origin; } catch { return js; }
+
+  function proxyifyImport(url: string): string {
+    if (!url || url.startsWith(PROXY_PATH)) return url;
+    if (url.startsWith("data:") || url.startsWith("blob:")) return url;
+    let abs: string;
+    if (/^https?:\/\//i.test(url)) {
+      abs = url;
+    } else if (url.startsWith("/")) {
+      abs = origin + url;
+    } else {
+      try { abs = new URL(url, pageUrl).href; } catch { return url; }
+    }
+    return `${PROXY_PATH}?url=${encodeURIComponent(abs)}`;
+  }
+
+  // from "url" / from 'url'  (covers import … from and export … from)
+  js = js.replace(/\bfrom\s*(["'])((?:\/|\.\.?\/|https?:\/\/)[^"'\\]+)\1/g,
+    (_, q, url) => `from ${q}${proxyifyImport(url)}${q}`);
+
+  // import "url" / import 'url'  (side-effect imports)
+  js = js.replace(/\bimport\s*(["'])((?:\/|\.\.?\/|https?:\/\/)[^"'\\]+)\1/g,
+    (_, q, url) => `import ${q}${proxyifyImport(url)}${q}`);
+
+  // dynamic import("url") / import('url')
+  js = js.replace(/\bimport\s*\(\s*(["'])((?:\/|\.\.?\/|https?:\/\/)[^"'\\]+)\1\s*\)/g,
+    (_, q, url) => `import(${q}${proxyifyImport(url)}${q})`);
+
+  return js;
 }
 
 function rewriteCss(css: string, pageUrl: string): string {
@@ -420,10 +465,12 @@ router.all("/proxy", async (req, res) => {
       res.setHeader("Content-Type", contentType.includes("charset") ? contentType : `${contentType}; charset=utf-8`);
       res.send(rewritten);
     } else if (contentType.includes("application/javascript") || contentType.includes("text/javascript")) {
-      // Pass JS through as-is — our injected fetch/XHR overrides handle the runtime
+      // Rewrite ES module import paths so the browser fetches chunks through our proxy
+      // instead of hitting the origin domain directly (which breaks for absolute-path imports)
       const js = await response.text();
+      const rewrittenJs = rewriteJsImports(js, finalUrl);
       res.setHeader("Content-Type", contentType);
-      res.send(js);
+      res.send(rewrittenJs);
     } else {
       const buffer = await response.arrayBuffer();
       res.setHeader("Content-Type", contentType);
