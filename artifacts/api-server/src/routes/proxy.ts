@@ -1,20 +1,24 @@
 import { Router } from "express";
 import { parse as parseHTML } from "node-html-parser";
-import { getStoredCookies, mergeCookies } from "../lib/cookie-store";
+import { getStoredCookies, mergeCookies, autoMergeCookiesFromSetCookie } from "../lib/cookie-store";
+import { getSelectedUaPreset } from "../lib/ua-store";
 
 const router = Router();
 
-const BROWSER_HEADERS_BASE: Record<string, string> = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br, zstd",
-  "Cache-Control": "no-cache",
-  Pragma: "no-cache",
-  "Sec-CH-UA": '"Chromium";v="136", "Google Chrome";v="136", "Not-A.Brand";v="99"',
-  "Sec-CH-UA-Mobile": "?0",
-  "Sec-CH-UA-Platform": '"Windows"',
-};
+function getBrowserHeadersBase(): Record<string, string> {
+  const preset = getSelectedUaPreset();
+  const headers: Record<string, string> = {
+    "User-Agent": preset.ua,
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+  };
+  if (preset.secChUa) headers["Sec-CH-UA"] = preset.secChUa;
+  if (preset.secChUaMobile) headers["Sec-CH-UA-Mobile"] = preset.secChUaMobile;
+  if (preset.secChUaPlatform) headers["Sec-CH-UA-Platform"] = preset.secChUaPlatform;
+  return headers;
+}
 
 // Headers we must never forward to the browser (they'd cause double-decompression or other issues)
 const STRIP_RESPONSE_HEADERS = new Set([
@@ -599,7 +603,7 @@ function buildFetchHeaders(
   const secFetchSite = computeSecFetchSite(targetUrl, refererUrl);
 
   const headers: Record<string, string> = {
-    ...BROWSER_HEADERS_BASE,
+    ...getBrowserHeadersBase(),
     Host: targetUrl.hostname,
     Origin: `${targetUrl.protocol}//${targetUrl.hostname}`,
   };
@@ -739,6 +743,9 @@ router.all("/proxy", async (req, res) => {
         c.replace(/;\s*domain=[^;]*/gi, "")
       );
       res.setHeader("Set-Cookie", sanitized);
+      // Auto-store cookies from this response into the server-side jar so future
+      // requests to this host automatically include them (e.g. login sessions, cf_clearance).
+      autoMergeCookiesFromSetCookie(parsedUrl.hostname, allSetCookies);
     }
 
     if (contentType.includes("text/html")) {

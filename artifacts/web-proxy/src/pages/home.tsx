@@ -17,6 +17,9 @@ import {
   Plus,
   ChevronDown,
   ChevronUp,
+  Settings,
+  Monitor,
+  Check,
 } from "lucide-react";
 import {
   useListHistory,
@@ -163,6 +166,29 @@ export default function Home() {
   const [cookieHostname, setCookieHostname] = useState("");
   const [cookieString, setCookieString] = useState("");
   const [cookieSaving, setCookieSaving] = useState(false);
+
+  // ── UA / settings state ─────────────────────────────────────────────
+  const [selectedUaKey, setSelectedUaKey] = useState("chrome-win");
+  const [uaPresets, setUaPresets] = useState<{ key: string; label: string }[]>([]);
+
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((data: { uaKey: string; uaPresets: { key: string; label: string }[] }) => {
+        setSelectedUaKey(data.uaKey);
+        setUaPresets(data.uaPresets);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSelectUa = async (key: string) => {
+    setSelectedUaKey(key);
+    await fetch("/api/settings/ua", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    }).catch(() => {});
+  };
 
   const navStack = useRef<string[]>([]);
   const navPos = useRef(-1);
@@ -436,6 +462,10 @@ export default function Home() {
                   className="flex-1 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none h-full text-xs uppercase tracking-wider font-semibold transition-colors">
                   <KeyRound className="h-3.5 w-3.5 mr-2" />Cookies
                 </TabsTrigger>
+                <TabsTrigger value="settings"
+                  className="flex-1 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none h-full text-xs uppercase tracking-wider font-semibold transition-colors">
+                  <Settings className="h-3.5 w-3.5 mr-2" />Settings
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="history" className="flex-1 overflow-hidden m-0 flex flex-col min-h-0">
@@ -587,6 +617,44 @@ export default function Home() {
                       ))}
                     </div>
                   )}
+                </ScrollArea>
+              </TabsContent>
+
+              <TabsContent value="settings" className="flex-1 overflow-hidden m-0 flex flex-col min-h-0">
+                <div className="flex items-center px-4 py-2 border-b border-border shrink-0">
+                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Browser Identity</span>
+                </div>
+                <ScrollArea className="flex-1">
+                  <div className="p-4 space-y-2">
+                    <p className="text-[10px] text-muted-foreground leading-relaxed mb-3">
+                      Choose what browser the proxy pretends to be. Different identities can help bypass bot detection on sites like chess.com.
+                    </p>
+                    {uaPresets.map((preset) => (
+                      <button
+                        key={preset.key}
+                        onClick={() => handleSelectUa(preset.key)}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md border text-left transition-all ${
+                          selectedUaKey === preset.key
+                            ? "border-primary bg-primary/10 text-foreground"
+                            : "border-border bg-secondary/30 text-muted-foreground hover:border-border/80 hover:bg-secondary/60 hover:text-foreground"
+                        }`}>
+                        <Monitor className={`h-4 w-4 shrink-0 ${selectedUaKey === preset.key ? "text-primary" : ""}`} />
+                        <span className="flex-1 text-sm font-medium">{preset.label}</span>
+                        {selectedUaKey === preset.key && (
+                          <Check className="h-3.5 w-3.5 text-primary shrink-0" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="px-4 pb-4">
+                    <div className="border-t border-border pt-4 mt-2">
+                      <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold block mb-2">Auto Cookie Jar</span>
+                      <p className="text-[10px] text-muted-foreground leading-relaxed">
+                        Cookies from every site you visit are automatically captured and replayed on future requests — including login sessions and Cloudflare clearance tokens. No manual import needed for sites you successfully log into through the proxy.
+                      </p>
+                    </div>
+                  </div>
                 </ScrollArea>
               </TabsContent>
 
