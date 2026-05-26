@@ -281,6 +281,42 @@ function buildInjectedScript(pageUrl: string): string {
     return _winOpen.call(window, url, target, features);
   };
 
+  // ── Fix document.currentScript.src for bundler publicPath computation ──
+  // Webpack/Vite often compute their public path by reading
+  // document.currentScript.src at module init time. Since we serve scripts
+  // through /api/proxy?url=…, currentScript.src is our proxy URL rather
+  // than the real chess.com URL, so the publicPath ends up as "/api/" and
+  // all chunk requests land on /api/<chunk>.js (which we 404).
+  // We intercept the getter and unwrap the ?url= param so bundlers see the
+  // real origin URL and compute the correct publicPath.
+  (function() {
+    var _csDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'currentScript');
+    if (!_csDesc) return;
+    Object.defineProperty(Document.prototype, 'currentScript', {
+      get: function() {
+        var cs = _csDesc.get.call(this);
+        if (!cs) return cs;
+        try {
+          return new Proxy(cs, {
+            get: function(target, prop) {
+              if (prop === 'src' || prop === 'baseURI') {
+                try {
+                  var raw = _csDesc.get.call(document)? target[prop] : target[prop];
+                  var u = new URL(String(raw));
+                  var real = u.searchParams.get('url');
+                  if (real) return real;
+                } catch(e) {}
+              }
+              var v = target[prop];
+              return typeof v === 'function' ? v.bind(target) : v;
+            }
+          });
+        } catch(e) { return cs; }
+      },
+      configurable: true
+    });
+  })();
+
   // ── Intercept DOM src/href property assignments ───────────────────────
   // Lazy-loaded images (and scripts/iframes) set src via JS property
   // assignment, which bypasses fetch/XHR interceptors. Override the
@@ -686,6 +722,41 @@ router.all("/proxy", async (req, res) => {
       </html>
     `);
   }
+});
+
+// ── Smart fallback: re-proxy chunk/asset requests that bypassed URL rewriting ──
+// When a proxied JS module does a DYNAMIC import('./chunk.js') that our static
+// regex couldn't rewrite, the browser resolves the relative path against the
+// module's URL (e.g. /api/proxy?url=…/play.js → /api/chunk.js).
+// We catch those here and use the Referer header to reconstruct the real
+// chess.com URL, then forward to the proxy handler.
+router.get(/.*/, async (req, res) => {
+  const referer = (req.headers["referer"] || req.headers["referrer"] || "") as string;
+
+  // Try to find a proxied-URL base from the Referer
+  let chessUrl = "";
+  try {
+    const refUrl = new URL(referer, "http://localhost");
+    const proxiedBase = refUrl.searchParams.get("url");
+    if (proxiedBase) {
+      // req.path is e.g. "/init.Bggg6JTtWg.chunk.js" (router strips /api prefix)
+      // Resolve relative to the proxied resource's directory
+      chessUrl = new URL(req.path.replace(/^\//, "./"), proxiedBase).href;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  if (!chessUrl) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  // Re-use our proxy handler by rewriting the query param
+  req.query.url = chessUrl;
+  // Forward internally to the proxy route by just running its logic
+  // (simplest: redirect to the proxy endpoint on our own server)
+  res.redirect(302, `/api/proxy?url=${encodeURIComponent(chessUrl)}`);
 });
 
 export default router;
