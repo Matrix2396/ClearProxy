@@ -194,6 +194,50 @@ function buildInjectedScript(pageUrl: string): string {
     try { if (url) url = toProxyUrl(String(url)); } catch(e) {}
     return _winOpen.call(window, url, target, features);
   };
+
+  // ── Intercept new Worker(url) ─────────────────────────────────────────
+  // Routes dedicated workers and module workers through the proxy so that
+  // WASM workers, chess engine workers, etc. load correctly.
+  var _OrigWorker = window.Worker;
+  if (_OrigWorker) {
+    function ProxiedWorker(url, opts) {
+      try { if (url && typeof url === 'string') url = toProxyUrl(url); } catch(e) {}
+      return opts !== undefined ? new _OrigWorker(url, opts) : new _OrigWorker(url);
+    }
+    ProxiedWorker.prototype = _OrigWorker.prototype;
+    ProxiedWorker.CONNECTING = _OrigWorker.CONNECTING;
+    try { window.Worker = ProxiedWorker; } catch(e) {}
+  }
+
+  // ── Suppress / stub Service Worker registration ───────────────────────
+  // Service Workers register at origin scope and intercept fetch on their
+  // own origin. Under a proxy they'd register against our proxy domain,
+  // intercept proxy requests, and break navigation. Stub the API so the
+  // page doesn't error but also doesn't install a broken SW.
+  try {
+    if (navigator.serviceWorker) {
+      var _swReg = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+      navigator.serviceWorker.register = function(scriptURL, options) {
+        // Attempt to register through proxy so chess.com's SW actually runs;
+        // fall back to a resolved no-op if that fails.
+        try {
+          var proxied = toProxyUrl(new URL(String(scriptURL), __PX_URL__).href);
+          return _swReg(proxied, options).catch(function() {
+            return Promise.resolve({ scope: '/', active: null, installing: null, waiting: null,
+              addEventListener: function(){}, removeEventListener: function(){} });
+          });
+        } catch(e2) {
+          return Promise.resolve({ scope: '/', active: null, installing: null, waiting: null,
+            addEventListener: function(){}, removeEventListener: function(){} });
+        }
+      };
+    }
+  } catch(e) {}
+
+  // ── Spoof navigator properties chess.com inspects ────────────────────
+  try { Object.defineProperty(navigator, 'webdriver', { get: function(){ return false; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'plugins',   { get: function(){ return [1,2,3,4,5]; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'languages', { get: function(){ return ['en-US','en']; }, configurable: true }); } catch(e) {}
 })();
 </script>`;
 }
@@ -323,6 +367,26 @@ function rewriteJsImports(js: string, pageUrl: string): string {
     return `${PROXY_PATH}?url=${encodeURIComponent(abs)}`;
   }
 
+  // ── import.meta.url patching ──────────────────────────────────────────
+  // Must run BEFORE global import.meta.url replacement so we can produce
+  // the correct proxy URL for static string literals.
+  // Pattern: new URL('./asset.wasm', import.meta.url)
+  //       or new URL('/abs/path', import.meta.url)
+  //       or new URL('https://…', import.meta.url)
+  js = js.replace(
+    /\bnew URL\(\s*(["'`])((?:https?:\/\/|\/|\.\.?\/)[^"'`\\]*)\1\s*,\s*import\.meta\.url\s*\)/g,
+    (_, _q, relUrl) => {
+      const proxied = proxyifyImport(resolveUrl(pageUrl, relUrl));
+      return `new URL(${JSON.stringify(proxied)}, location.origin)`;
+    }
+  );
+
+  // Replace all remaining import.meta.url references with the actual file URL
+  // so that new URL(dynamicExpr, import.meta.url) resolves to the correct origin
+  // and so that code inspecting import.meta.url for the script's own path works.
+  js = js.replace(/\bimport\.meta\.url\b/g, JSON.stringify(pageUrl));
+
+  // ── ES module import path rewriting ──────────────────────────────────
   // from "url" / from 'url'  (covers import … from and export … from)
   js = js.replace(/\bfrom\s*(["'])((?:\/|\.\.?\/|https?:\/\/)[^"'\\]+)\1/g,
     (_, q, url) => `from ${q}${proxyifyImport(url)}${q}`);
