@@ -492,6 +492,89 @@ function buildInjectedScript(pageUrl: string): string {
 </script>`;
 }
 
+/** Returns true when the response looks like a Cloudflare or similar bot-protection challenge. */
+function isChallengePage(response: { status: number; headers: { get(k: string): string | null } }, html: string): boolean {
+  const status = response.status;
+  const cfMitigated = response.headers.get("cf-mitigated");
+  const cfRay = response.headers.get("cf-ray");
+
+  // Cloudflare explicit challenge/block indicators
+  if (cfMitigated) return true;
+  if ((status === 403 || status === 429 || status === 503) && cfRay) return true;
+
+  // Patterns found in Cloudflare challenge HTML
+  const cfPatterns = [
+    "cf-challenge",
+    "cf_chl_opt",
+    "__cf_chl_",
+    "challenge-platform",
+    "cf.challenge",
+    "cfreload",
+    "Checking if the site connection is secure",
+    "Enable JavaScript and cookies to continue",
+    "DDoS protection by",
+    "cf-browser-verification",
+    "cf_captcha_kind",
+    "cf-turnstile",
+    "hcaptcha.com/captcha",
+  ];
+  for (const pat of cfPatterns) {
+    if (html.includes(pat)) return true;
+  }
+
+  // Generic bot-wall patterns from other providers
+  if (html.includes("__ddg") || html.includes("datadome") || html.includes("PerimeterX")) return true;
+
+  return false;
+}
+
+/** Build the challenge-helper overlay HTML to inject at the top of a challenge page body. */
+function buildChallengeOverlay(targetUrl: string): string {
+  const host = (() => { try { return new URL(targetUrl).hostname; } catch { return targetUrl; } })();
+  return `
+<div id="__px_cf" style="position:fixed;top:0;left:0;right:0;z-index:2147483647;background:linear-gradient(135deg,#0a0a14 0%,#111827 100%);border-bottom:1px solid rgba(0,255,255,0.18);padding:10px 16px;display:flex;align-items:center;gap:12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;box-shadow:0 4px 24px rgba(0,0,0,0.5);">
+  <div id="__px_spin" style="width:15px;height:15px;flex-shrink:0;border:2px solid rgba(0,255,255,0.2);border-top-color:#00ffff;border-radius:50%;animation:__px_s 0.75s linear infinite"></div>
+  <div style="flex:1;min-width:0">
+    <div id="__px_title" style="color:#e5e7eb;font-size:12px;font-weight:600;line-height:1.3">Security checkpoint — <span style="color:#00ffff">${host}</span></div>
+    <div id="__px_sub" style="color:#6b7280;font-size:11px;margin-top:2px;line-height:1.4">Attempting to pass automatically… complete any visible checkbox or puzzle if one appears below.</div>
+  </div>
+  <div style="display:flex;gap:6px;flex-shrink:0">
+    <button id="__px_retry" onclick="location.reload()" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#9ca3af;padding:4px 10px;border-radius:5px;font-size:11px;cursor:pointer;transition:all 0.15s" onmouseover="this.style.color='#e5e7eb'" onmouseout="this.style.color='#9ca3af'">Retry</button>
+  </div>
+</div>
+<style>@keyframes __px_s{to{transform:rotate(360deg)}}#__px_cf *{box-sizing:border-box}</style>
+<script>
+(function(){
+  // After 6 s without a navigation — warn that manual action may be needed
+  var _t1 = setTimeout(function(){
+    var s = document.getElementById('__px_sub');
+    var sp = document.getElementById('__px_spin');
+    if(s) s.textContent = 'Automatic pass timed out — look for a checkbox or puzzle on the page. Or open Settings in ClearProxy to switch browser identity, then retry.';
+    if(sp) { sp.style.borderTopColor='#f59e0b'; sp.style.animationDuration='1.5s'; }
+  }, 6000);
+  // After 20 s with no action — suggest cookie import
+  var _t2 = setTimeout(function(){
+    var s = document.getElementById('__px_sub');
+    if(s) s.innerHTML = 'Still stuck? Log in at <a href="${escapeHtml(targetUrl)}" target="_blank" style="color:#00ffff;text-decoration:none">${host}</a> in a real browser, copy your cookies (DevTools → Console → <code style="background:rgba(0,255,255,0.1);padding:1px 4px;border-radius:3px">copy(document.cookie)</code>), then paste them in the Cookies tab in ClearProxy.';
+  }, 20000);
+  // Dismiss banner when challenge resolves (page navigates away)
+  window.addEventListener('beforeunload', function(){
+    clearTimeout(_t1); clearTimeout(_t2);
+    var b = document.getElementById('__px_cf');
+    if(b){ b.style.background='linear-gradient(135deg,#071a0c,#0f1f12)'; }
+    var s = document.getElementById('__px_sub');
+    if(s) s.textContent='Challenge passed — loading page…';
+    var sp = document.getElementById('__px_spin');
+    if(sp){ sp.style.borderTopColor='#22c55e'; sp.style.animation='none'; }
+  });
+})();
+</script>`;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 function rewriteHtml(html: string, pageUrl: string): string {
   const root = parseHTML(html, { lowerCaseTagName: false, comment: true });
 
@@ -872,7 +955,21 @@ router.all("/proxy", async (req, res) => {
 
     if (contentType.includes("text/html")) {
       const html = await response.text();
-      const rewritten = rewriteHtml(html, finalUrl);
+      let rewritten = rewriteHtml(html, finalUrl);
+
+      // If this is a bot-protection challenge page, inject a helper overlay
+      // so the user sees clear guidance while the challenge JS runs normally.
+      if (isChallengePage(response, html)) {
+        // Insert overlay right after <body> (or at the very start if no body tag)
+        const bodyIdx = rewritten.search(/<body[^>]*>/i);
+        if (bodyIdx !== -1) {
+          const afterBody = rewritten.indexOf(">", bodyIdx) + 1;
+          rewritten = rewritten.slice(0, afterBody) + buildChallengeOverlay(finalUrl) + rewritten.slice(afterBody);
+        } else {
+          rewritten = buildChallengeOverlay(finalUrl) + rewritten;
+        }
+      }
+
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(rewritten);
     } else if (contentType.includes("text/css")) {
