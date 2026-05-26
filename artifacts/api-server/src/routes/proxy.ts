@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { parse as parseHTML } from "node-html-parser";
+import { getStoredCookies, mergeCookies } from "../lib/cookie-store";
 
 const router = Router();
 
@@ -644,10 +645,11 @@ router.all("/proxy", async (req, res) => {
     return;
   }
 
-  // Use explicit proxy cookie header first; fall back to the browser's own Cookie
-  // header (which accumulates Set-Cookie values our proxy previously forwarded,
-  // including Cloudflare cf_clearance and site session tokens).
-  const proxyCookie = (req.headers["x-proxy-cookie"] || req.headers["cookie"]) as string | undefined;
+  // Merge stored session cookies (imported by user) with browser-forwarded cookies.
+  // Browser-forwarded cookies take precedence (they carry live Set-Cookie responses).
+  const storedCookie = getStoredCookies(parsedUrl.hostname);
+  const browserCookie = (req.headers["x-proxy-cookie"] || req.headers["cookie"]) as string | undefined;
+  const proxyCookie = mergeCookies(storedCookie, browserCookie);
   const isDocument = !req.headers["x-requested-with"];
 
   // Extract the real proxied URL from the browser's Referer header.

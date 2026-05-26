@@ -12,6 +12,11 @@ import {
   ShieldAlert,
   Shield,
   Globe,
+  KeyRound,
+  Trash2,
+  Plus,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import {
   useListHistory,
@@ -27,6 +32,7 @@ import { format } from "date-fns";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -151,6 +157,13 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
 
+  // ── Cookie import state ─────────────────────────────────────────────
+  const [cookieEntries, setCookieEntries] = useState<Record<string, string>>({});
+  const [showImportForm, setShowImportForm] = useState(false);
+  const [cookieHostname, setCookieHostname] = useState("");
+  const [cookieString, setCookieString] = useState("");
+  const [cookieSaving, setCookieSaving] = useState(false);
+
   const navStack = useRef<string[]>([]);
   const navPos = useRef(-1);
   const [canBack, setCanBack] = useState(false);
@@ -168,6 +181,43 @@ export default function Home() {
   const clearHistory = useClearHistory();
   const createBookmark = useCreateBookmark();
   const deleteBookmark = useDeleteBookmark();
+
+  const fetchCookieEntries = useCallback(() => {
+    fetch("/api/cookies")
+      .then((r) => r.json())
+      .then((data) => setCookieEntries(data as Record<string, string>))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => { fetchCookieEntries(); }, [fetchCookieEntries]);
+
+  const handleSaveCookies = async () => {
+    const hostname = cookieHostname.trim().replace(/^https?:\/\//, "").split("/")[0];
+    if (!hostname || !cookieString.trim()) return;
+    setCookieSaving(true);
+    try {
+      await fetch("/api/cookies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostname, cookies: cookieString.trim() }),
+      });
+      setCookieHostname("");
+      setCookieString("");
+      setShowImportForm(false);
+      fetchCookieEntries();
+      toast({ title: `Cookies saved for ${hostname}` });
+    } catch {
+      toast({ title: "Failed to save cookies", variant: "destructive" });
+    } finally {
+      setCookieSaving(false);
+    }
+  };
+
+  const handleDeleteCookies = async (hostname: string) => {
+    await fetch(`/api/cookies/${encodeURIComponent(hostname)}`, { method: "DELETE" });
+    fetchCookieEntries();
+    toast({ title: `Cookies cleared for ${hostname}` });
+  };
 
   const syncNavButtons = useCallback(() => {
     setCanBack(navPos.current > 0);
@@ -382,6 +432,10 @@ export default function Home() {
                   className="flex-1 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none h-full text-xs uppercase tracking-wider font-semibold transition-colors">
                   <BookmarkIcon className="h-3.5 w-3.5 mr-2" />Bookmarks
                 </TabsTrigger>
+                <TabsTrigger value="cookies"
+                  className="flex-1 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none h-full text-xs uppercase tracking-wider font-semibold transition-colors">
+                  <KeyRound className="h-3.5 w-3.5 mr-2" />Cookies
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="history" className="flex-1 overflow-hidden m-0 flex flex-col min-h-0">
@@ -464,6 +518,78 @@ export default function Home() {
                   )}
                 </ScrollArea>
               </TabsContent>
+              <TabsContent value="cookies" className="flex-1 overflow-hidden m-0 flex flex-col min-h-0">
+                <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
+                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Session Cookies</span>
+                  <Button variant="ghost" size="sm"
+                    className="h-6 text-[10px] text-primary hover:text-primary hover:bg-primary/10 px-2"
+                    onClick={() => setShowImportForm((v) => !v)}>
+                    {showImportForm ? <ChevronUp className="h-3 w-3 mr-1" /> : <Plus className="h-3 w-3 mr-1" />}
+                    {showImportForm ? "Cancel" : "Import"}
+                  </Button>
+                </div>
+
+                {showImportForm && (
+                  <div className="px-4 py-3 border-b border-border bg-secondary/30 shrink-0 space-y-2">
+                    <p className="text-[10px] text-muted-foreground leading-relaxed">
+                      Log in on the real site, then copy your cookies:
+                    </p>
+                    <ol className="text-[10px] text-muted-foreground space-y-1 leading-relaxed list-decimal list-inside">
+                      <li>Open DevTools (<kbd className="bg-secondary px-1 rounded text-[9px]">F12</kbd>)</li>
+                      <li>Application → Cookies → select the site</li>
+                      <li>Open Console, paste: <code className="bg-secondary px-1 rounded text-[9px] text-primary">copy(document.cookie)</code></li>
+                      <li>Paste the result below</li>
+                    </ol>
+                    <Input
+                      placeholder="hostname (e.g. www.chess.com)"
+                      value={cookieHostname}
+                      onChange={(e) => setCookieHostname(e.target.value)}
+                      className="h-7 text-xs bg-background border-border"
+                    />
+                    <Textarea
+                      placeholder="Paste cookies here..."
+                      value={cookieString}
+                      onChange={(e) => setCookieString(e.target.value)}
+                      className="text-xs bg-background border-border resize-none h-20 font-mono"
+                    />
+                    <Button size="sm" className="w-full h-7 text-xs"
+                      onClick={handleSaveCookies}
+                      disabled={cookieSaving || !cookieHostname.trim() || !cookieString.trim()}>
+                      {cookieSaving ? "Saving..." : "Save Cookies"}
+                    </Button>
+                  </div>
+                )}
+
+                <ScrollArea className="flex-1">
+                  {Object.keys(cookieEntries).length === 0 ? (
+                    <div className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
+                      <KeyRound className="h-8 w-8 opacity-15" />
+                      <span className="text-xs text-center px-4">
+                        No session cookies yet.<br />Import cookies to bypass login walls.
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-border">
+                      {Object.entries(cookieEntries).map(([host, cookies]) => (
+                        <div key={host} className="flex items-center gap-3 p-3 hover:bg-secondary/60 group transition-colors">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium truncate">{host}</p>
+                            <p className="text-[10px] text-muted-foreground truncate font-mono mt-0.5">
+                              {cookies.slice(0, 60)}{cookies.length > 60 ? "…" : ""}
+                            </p>
+                          </div>
+                          <Button variant="ghost" size="icon"
+                            className="h-7 w-7 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-all shrink-0"
+                            onClick={() => handleDeleteCookies(host)}>
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </ScrollArea>
+              </TabsContent>
+
             </Tabs>
           </SheetContent>
         </Sheet>
