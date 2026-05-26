@@ -85,6 +85,12 @@ function buildInjectedScript(pageUrl: string): string {
   var _pxCurrentUrl = __PX_URL__;
   function _pxParsed() { try { return new URL(_pxCurrentUrl); } catch(e) { return new URL(__PX_URL__); } }
 
+  // Store the proxied origin in sessionStorage so that if the iframe ever
+  // lands on a page on our own domain (e.g. /play/online after a pushState),
+  // the NotFound recovery component can redirect back through the proxy.
+  try { sessionStorage.setItem('__px_origin__', new URL(__PX_URL__).origin); } catch(e) {}
+  try { sessionStorage.setItem('__px_current__', __PX_URL__); } catch(e) {}
+
   // ── Location spoofing ────────────────────────────────────────────────
   // Full spoof: hostname, host, origin, protocol, pathname, search, hash,
   // href (getter + setter), location.assign, location.replace.
@@ -140,7 +146,7 @@ function buildInjectedScript(pageUrl: string): string {
     } catch(e) { return href; }
   }
 
-  // ── location.assign / location.replace ───────────────────────────────
+  // ── location.assign / location.replace / location.reload ─────────────
   // These cause full navigations — rewrite the target URL through the proxy.
   try {
     location.assign = function(url) {
@@ -160,6 +166,13 @@ function buildInjectedScript(pageUrl: string): string {
       } catch(e) {}
     };
   } catch(e) {}
+  // Override reload() so that reloading a SPA-pushed path (e.g. /play/online)
+  // navigates back through the proxy rather than reloading our React shell.
+  try {
+    location.reload = function() {
+      _realSetHref(toProxyUrl(_pxCurrentUrl));
+    };
+  } catch(e) {}
 
   // ── Parent notifications (debounced, deduplicated) ───────────────────
   var _lastNotifyUrl = '';
@@ -167,6 +180,8 @@ function buildInjectedScript(pageUrl: string): string {
   function notify(url, title) {
     if (!url || url === _lastNotifyUrl) return;
     _lastNotifyUrl = url;
+    // Keep sessionStorage current so NotFound recovery can reconstruct the URL
+    try { sessionStorage.setItem('__px_current__', url); } catch(e) {}
     clearTimeout(_notifyTimer);
     _notifyTimer = setTimeout(function() {
       try { _realParent.postMessage({ type: 'proxy-navigate', url: url, title: title || document.title }, '*'); } catch(e) {}
