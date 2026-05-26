@@ -5,31 +5,14 @@ const router = Router();
 
 const BROWSER_HEADERS_BASE: Record<string, string> = {
   "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
   "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br, zstd",
   "Cache-Control": "no-cache",
   Pragma: "no-cache",
-  "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+  "Sec-CH-UA": '"Chromium";v="136", "Google Chrome";v="136", "Not-A.Brand";v="99"',
   "Sec-CH-UA-Mobile": "?0",
   "Sec-CH-UA-Platform": '"Windows"',
-};
-
-const BROWSER_HEADERS_DOCUMENT: Record<string, string> = {
-  ...BROWSER_HEADERS_BASE,
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-  "Sec-Fetch-Dest": "document",
-  "Sec-Fetch-Mode": "navigate",
-  "Sec-Fetch-Site": "none",
-  "Sec-Fetch-User": "?1",
-  "Upgrade-Insecure-Requests": "1",
-};
-
-const BROWSER_HEADERS_RESOURCE: Record<string, string> = {
-  ...BROWSER_HEADERS_BASE,
-  Accept: "*/*",
-  "Sec-Fetch-Dest": "empty",
-  "Sec-Fetch-Mode": "cors",
-  "Sec-Fetch-Site": "same-origin",
 };
 
 // Headers we must never forward to the browser (they'd cause double-decompression or other issues)
@@ -576,14 +559,56 @@ function rewriteCss(css: string, pageUrl: string): string {
   });
 }
 
-function buildFetchHeaders(targetUrl: URL, isDocument: boolean, proxyCookie?: string): Record<string, string> {
-  const base = isDocument ? BROWSER_HEADERS_DOCUMENT : BROWSER_HEADERS_RESOURCE;
+function computeSecFetchSite(targetUrl: URL, refererUrl: URL | null): string {
+  if (!refererUrl) return "none";
+  if (refererUrl.hostname === targetUrl.hostname) return "same-origin";
+  const refParts = refererUrl.hostname.split(".").slice(-2).join(".");
+  const tgtParts = targetUrl.hostname.split(".").slice(-2).join(".");
+  if (refParts === tgtParts) return "same-site";
+  return "cross-site";
+}
+
+function buildFetchHeaders(
+  targetUrl: URL,
+  isDocument: boolean,
+  proxyCookie?: string,
+  proxyReferer?: string,
+): Record<string, string> {
+  // Parse the real referer URL (the proxied page the user came from)
+  let refererUrl: URL | null = null;
+  if (proxyReferer) {
+    try { refererUrl = new URL(proxyReferer); } catch {}
+  }
+
+  const secFetchSite = computeSecFetchSite(targetUrl, refererUrl);
+
   const headers: Record<string, string> = {
-    ...base,
+    ...BROWSER_HEADERS_BASE,
     Host: targetUrl.hostname,
     Origin: `${targetUrl.protocol}//${targetUrl.hostname}`,
-    Referer: `${targetUrl.protocol}//${targetUrl.hostname}/`,
   };
+
+  if (isDocument) {
+    headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8";
+    headers["Sec-Fetch-Dest"] = "document";
+    headers["Sec-Fetch-Mode"] = "navigate";
+    headers["Sec-Fetch-Site"] = secFetchSite;
+    headers["Sec-Fetch-User"] = "?1";
+    headers["Upgrade-Insecure-Requests"] = "1";
+    // Use the real referer when navigating within a site
+    headers["Referer"] = refererUrl
+      ? `${refererUrl.protocol}//${refererUrl.hostname}${refererUrl.pathname}${refererUrl.search}`
+      : `${targetUrl.protocol}//${targetUrl.hostname}/`;
+  } else {
+    headers["Accept"] = "*/*";
+    headers["Sec-Fetch-Dest"] = "empty";
+    headers["Sec-Fetch-Mode"] = "cors";
+    headers["Sec-Fetch-Site"] = secFetchSite === "none" ? "same-origin" : secFetchSite;
+    headers["Referer"] = refererUrl
+      ? `${refererUrl.protocol}//${refererUrl.hostname}${refererUrl.pathname}${refererUrl.search}`
+      : `${targetUrl.protocol}//${targetUrl.hostname}/`;
+  }
+
   if (proxyCookie) headers["Cookie"] = proxyCookie;
   return headers;
 }
@@ -609,7 +634,22 @@ router.all("/proxy", async (req, res) => {
   // including Cloudflare cf_clearance and site session tokens).
   const proxyCookie = (req.headers["x-proxy-cookie"] || req.headers["cookie"]) as string | undefined;
   const isDocument = !req.headers["x-requested-with"];
-  const fetchHeaders = buildFetchHeaders(parsedUrl, isDocument, proxyCookie);
+
+  // Extract the real proxied URL from the browser's Referer header.
+  // The browser sends Referer as our proxy URL (/api/proxy?url=https://...) —
+  // we unwrap the ?url= param to get the real origin URL so Sec-Fetch-Site
+  // and Referer forwarded to the target are accurate.
+  let proxyReferer: string | undefined;
+  const rawReferer = req.headers["referer"] as string | undefined;
+  if (rawReferer) {
+    try {
+      const refUrl = new URL(rawReferer, "http://localhost");
+      const unwrapped = refUrl.searchParams.get("url");
+      proxyReferer = unwrapped || rawReferer;
+    } catch {}
+  }
+
+  const fetchHeaders = buildFetchHeaders(parsedUrl, isDocument, proxyCookie, proxyReferer);
 
   const method = req.method.toUpperCase();
   const hasBody = method !== "GET" && method !== "HEAD";
