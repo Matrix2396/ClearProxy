@@ -194,35 +194,49 @@ function buildInjectedScript(pageUrl: string): string {
 
   var _push = history.pushState.bind(history);
   var _replace = history.replaceState.bind(history);
+
+  // Helper: resolve url against current real URL, update tracking, return
+  // the URL that should be passed to the native pushState/replaceState.
+  // KEY INSIGHT: for relative/path-only URLs we pass them through UNCHANGED
+  // so the SPA router sees the correct location.pathname (e.g. '/play/online').
+  // Only full absolute URLs need rewriting to a relative path so the browser
+  // doesn't throw a cross-origin SecurityError.
+  function _pxRewritePushUrl(url) {
+    var origUrl = new URL(String(url), _pxCurrentUrl).href;
+    _pxCurrentUrl = origUrl;
+    // If url was already relative (no scheme), leave it alone so the browser
+    // gives the SPA router the correct pathname naturally.
+    if (!/^https?:/i.test(String(url))) return url;
+    // Absolute URL → strip to path+search+hash to keep it same-origin
+    var parsed = new URL(origUrl);
+    return parsed.pathname + parsed.search + parsed.hash;
+  }
+
   history.pushState = function(s, t, url) {
-    if (url) {
-      try {
-        var origUrl = new URL(String(url), _pxCurrentUrl).href;
-        _pxCurrentUrl = origUrl;
-        url = toProxyUrl(origUrl);
-      } catch(e) {}
-    }
+    if (url) { try { url = _pxRewritePushUrl(String(url)); } catch(e) {} }
     _push.call(history, s, t, url);
     notify(_pxCurrentUrl, document.title);
   };
   history.replaceState = function(s, t, url) {
-    if (url) {
-      try {
-        var origUrl = new URL(String(url), _pxCurrentUrl).href;
-        _pxCurrentUrl = origUrl;
-        url = toProxyUrl(origUrl);
-      } catch(e) {}
-    }
+    if (url) { try { url = _pxRewritePushUrl(String(url)); } catch(e) {} }
     _replace.call(history, s, t, url);
     notify(_pxCurrentUrl, document.title);
   };
   window.addEventListener('popstate', function() {
-    // After back/forward navigation the actual browser URL is a proxy URL — extract the real one
+    // After back/forward: browser URL is the path chess.com pushed (/play/online)
+    // Reconstruct the full real URL using the chess.com origin
     try {
       var realHref = _realHref();
+      // If it looks like a proxy URL (?url= param), extract from it
       var u = new URL(realHref);
       var param = u.searchParams.get('url');
-      if (param) _pxCurrentUrl = param; else _pxCurrentUrl = realHref;
+      if (param) {
+        _pxCurrentUrl = param;
+      } else {
+        // It's a plain path the SPA pushed — combine with the chess.com origin
+        var chessOrigin = new URL(__PX_URL__).origin;
+        _pxCurrentUrl = chessOrigin + u.pathname + u.search + u.hash;
+      }
     } catch(e) {}
     notify(_pxCurrentUrl, document.title);
   });
@@ -266,6 +280,48 @@ function buildInjectedScript(pageUrl: string): string {
     try { if (url) url = toProxyUrl(String(url)); } catch(e) {}
     return _winOpen.call(window, url, target, features);
   };
+
+  // ── Intercept DOM src/href property assignments ───────────────────────
+  // Lazy-loaded images (and scripts/iframes) set src via JS property
+  // assignment, which bypasses fetch/XHR interceptors. Override the
+  // prototype setters so every assignment goes through the proxy.
+  (function() {
+    function proxySrcSetter(proto, prop) {
+      var desc = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!desc || !desc.set) return;
+      var _orig = desc.set;
+      Object.defineProperty(proto, prop, {
+        get: desc.get,
+        set: function(val) {
+          try { val = toProxyUrl(String(val)); } catch(e) {}
+          _orig.call(this, val);
+        },
+        configurable: true,
+        enumerable: desc.enumerable
+      });
+    }
+    try { proxySrcSetter(HTMLImageElement.prototype,  'src');      } catch(e) {}
+    try { proxySrcSetter(HTMLScriptElement.prototype, 'src');      } catch(e) {}
+    try { proxySrcSetter(HTMLIFrameElement.prototype, 'src');      } catch(e) {}
+    try { proxySrcSetter(HTMLSourceElement.prototype, 'src');      } catch(e) {}
+    try { proxySrcSetter(HTMLSourceElement.prototype, 'srcset');   } catch(e) {}
+    try { proxySrcSetter(HTMLLinkElement.prototype,   'href');     } catch(e) {}
+    try { proxySrcSetter(HTMLMediaElement.prototype,  'src');      } catch(e) {}
+  })();
+
+  // Also intercept setAttribute so data-src / data-original style lazy
+  // loaders that later do img.src = img.dataset.src get proxied values.
+  (function() {
+    var _origSetAttr = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {
+      var lname = name.toLowerCase();
+      if (lname === 'src' || lname === 'href' || lname === 'action' ||
+          lname === 'data-src' || lname === 'data-lazy-src' || lname === 'data-original') {
+        try { value = toProxyUrl(String(value)); } catch(e) {}
+      }
+      return _origSetAttr.call(this, name, value);
+    };
+  })();
 
   // ── Intercept new Worker(url) ─────────────────────────────────────────
   // Routes dedicated workers and module workers through the proxy so that
@@ -383,15 +439,17 @@ function rewriteHtml(html: string, pageUrl: string): string {
     }
   }
 
-  // Rewrite data-src on <script> tags — chess.com/Vite lazy-load scripts via
-  // data-src and then do `script.src = script.dataset.src` in JS. The browser's
-  // native src assignment bypasses our fetch override, so we must pre-rewrite
-  // the data-src value here so the JS ends up assigning a proxy URL.
-  for (const el of root.querySelectorAll("script[data-src]")) {
-    const dataSrc = el.getAttribute("data-src");
-    if (dataSrc) {
-      const abs = resolveUrl(pageUrl, dataSrc);
-      el.setAttribute("data-src", rewriteUrl(abs));
+  // Rewrite data-src / data-lazy-src / data-original on any element.
+  // Many sites (chess.com included) lazy-load images by setting
+  // img.src = img.dataset.src in JS — we pre-rewrite the data attribute so
+  // when JS reads it and assigns to .src, it gets the proxy URL.
+  for (const attr of ["data-src", "data-lazy-src", "data-original", "data-url"]) {
+    for (const el of root.querySelectorAll(`[${attr}]`)) {
+      const val = el.getAttribute(attr);
+      if (val) {
+        const abs = resolveUrl(pageUrl, val);
+        el.setAttribute(attr, rewriteUrl(abs));
+      }
     }
   }
 
