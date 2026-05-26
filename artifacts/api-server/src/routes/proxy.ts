@@ -401,10 +401,93 @@ function buildInjectedScript(pageUrl: string): string {
     }
   } catch(e) {}
 
-  // ── Spoof navigator properties chess.com inspects ────────────────────
-  try { Object.defineProperty(navigator, 'webdriver', { get: function(){ return false; }, configurable: true }); } catch(e) {}
-  try { Object.defineProperty(navigator, 'plugins',   { get: function(){ return [1,2,3,4,5]; }, configurable: true }); } catch(e) {}
-  try { Object.defineProperty(navigator, 'languages', { get: function(){ return ['en-US','en']; }, configurable: true }); } catch(e) {}
+  // ── Spoof navigator properties chess.com / fingerprinters inspect ────
+  try { Object.defineProperty(navigator, 'webdriver',           { get: function(){ return false; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'plugins',             { get: function(){ return [1,2,3,4,5]; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'languages',           { get: function(){ return ['en-US','en']; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: function(){ return 8; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'deviceMemory',        { get: function(){ return 8; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'maxTouchPoints',      { get: function(){ return 0; }, configurable: true }); } catch(e) {}
+  try {
+    var _conn = { effectiveType: '4g', rtt: 50, downlink: 10, saveData: false };
+    Object.defineProperty(navigator, 'connection', { get: function(){ return _conn; }, configurable: true });
+  } catch(e) {}
+
+  // ── Spoof screen dimensions (look like a real 1080p desktop) ─────────
+  try { Object.defineProperty(screen, 'width',       { get: function(){ return 1920; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(screen, 'height',      { get: function(){ return 1080; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(screen, 'availWidth',  { get: function(){ return 1920; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(screen, 'availHeight', { get: function(){ return 1040; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(screen, 'colorDepth',  { get: function(){ return 24; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(screen, 'pixelDepth',  { get: function(){ return 24; }, configurable: true }); } catch(e) {}
+
+  // ── Spoof document properties ─────────────────────────────────────────
+  // document.referrer — spoof to look like navigating within the site itself
+  try {
+    Object.defineProperty(document, 'referrer', {
+      get: function() {
+        try { return _pxParsed().origin + '/'; } catch(e) { return ''; }
+      },
+      configurable: true
+    });
+  } catch(e) {}
+  // Visibility — the page thinks it is always visible / focused
+  try { Object.defineProperty(document, 'hidden',          { get: function(){ return false; },     configurable: true }); } catch(e) {}
+  try { Object.defineProperty(document, 'visibilityState', { get: function(){ return 'visible'; }, configurable: true }); } catch(e) {}
+  try { document.hasFocus = function(){ return true; }; } catch(e) {}
+
+  // ── window.chrome — presence expected by Chrome-detection scripts ─────
+  try {
+    if (!window.chrome) {
+      window.chrome = {
+        runtime: {
+          sendMessage: function(){},
+          connect:     function(){ return { onMessage: { addListener: function(){} }, postMessage: function(){}, disconnect: function(){} }; },
+          onMessage:   { addListener: function(){}, removeListener: function(){} },
+          id:          undefined
+        },
+        loadTimes: function(){ return {}; },
+        csi:       function(){ return {}; },
+        app:       {}
+      };
+    }
+  } catch(e) {}
+
+  // ── Block WebRTC IP leaks ─────────────────────────────────────────────
+  // RTCPeerConnection can expose the real server IP via STUN candidates.
+  // Stub it so it never gathers ICE candidates.
+  try {
+    var _OrigRTC = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+    if (_OrigRTC) {
+      var _StubbedRTC = function(config, constraints) {
+        // Strip all ICE servers so no STUN/TURN candidates are generated
+        var safeConfig = config ? Object.assign({}, config, { iceServers: [] }) : {};
+        var conn = new _OrigRTC(safeConfig, constraints);
+        // Override createOffer / createDataChannel so callers don't crash
+        var _origCreateOffer = conn.createOffer.bind(conn);
+        conn.createOffer = function(opts) {
+          return _origCreateOffer(opts).catch(function(){ return { type: 'offer', sdp: '' }; });
+        };
+        return conn;
+      };
+      _StubbedRTC.prototype = _OrigRTC.prototype;
+      if (window.RTCPeerConnection)       window.RTCPeerConnection       = _StubbedRTC;
+      if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = _StubbedRTC;
+    }
+  } catch(e) {}
+
+  // ── Neutralise remaining top/parent escape attempts at runtime ────────
+  // Belt-and-suspenders: even after our property overrides above, some minified
+  // frame-busting scripts cache 'top' in a local variable before our script
+  // runs. We override window.top setter to make any write a no-op.
+  try {
+    window.addEventListener('error', function(ev) {
+      // Silence SecurityErrors from top.location assignments that slip through
+      if (ev && ev.message && ev.message.indexOf('cross-origin') !== -1) {
+        ev.preventDefault(); ev.stopImmediatePropagation();
+      }
+    }, true);
+  } catch(e) {}
 })();
 </script>`;
 }
@@ -516,6 +599,45 @@ function rewriteHtml(html: string, pageUrl: string): string {
   }
 
   return root.toString();
+}
+
+/**
+ * Strip common frame-busting and anti-proxy-detection patterns from JavaScript.
+ * Applied server-side to every JS file before it reaches the browser.
+ *
+ * Patterns targeted:
+ *  - Comparisons that detect iframe embedding (top !== self, window !== top, etc.)
+ *  - Direct top.location / parent.location escape assignments
+ *  - Checks that read document.domain to detect cross-origin framing
+ */
+function neutralizeFrameBusting(js: string): string {
+  // ── Iframe-detection boolean expressions ───────────────────────────────
+  // Replace the comparison with a literal `false` so any `if (top !== self)`
+  // block never executes. Our injected script already overrides window.top,
+  // but some scripts cache it before our override runs — this is belt-and-suspenders.
+  js = js.replace(/\btop\s*!==?\s*self\b/g,     'false');
+  js = js.replace(/\btop\s*!==?\s*window\b/g,   'false');
+  js = js.replace(/\bself\s*!==?\s*top\b/g,     'false');
+  js = js.replace(/\bwindow\s*!==?\s*top\b/g,   'false');
+  js = js.replace(/\bwindow\.top\s*!==?\s*window(?:\.self)?\b/g, 'false');
+  js = js.replace(/\bwindow\.top\s*!==?\s*self\b/g,             'false');
+  js = js.replace(/\bwindow\s*!==?\s*window\.top\b/g,           'false');
+  // Equality variants (frame-busters that do `if (top === self) { /* ok */ }`)
+  js = js.replace(/\btop\s*===?\s*self\b/g,     'true');
+  js = js.replace(/\btop\s*===?\s*window\b/g,   'true');
+  js = js.replace(/\bself\s*===?\s*top\b/g,     'true');
+  js = js.replace(/\bwindow\s*===?\s*top\b/g,   'true');
+
+  // ── top.location / parent.location escape assignments ──────────────────
+  // Turn "top.location = url" and "top.location.href = url" into void expressions.
+  // We use a wrapper function instead of a bare void so the right-hand-side
+  // expression is still evaluated (prevents syntax errors in complex expressions).
+  js = js.replace(/\btop\.location\.href\s*=/g,    '(function(_v){/*px-blocked*/})/**/.call(this,');
+  js = js.replace(/\btop\.location\s*=/g,           '(function(_v){/*px-blocked*/})/**/.call(this,');
+  js = js.replace(/\bparent\.location\.href\s*=/g,  '(function(_v){/*px-blocked*/})/**/.call(this,');
+  js = js.replace(/\bparent\.location\s*=/g,        '(function(_v){/*px-blocked*/})/**/.call(this,');
+
+  return js;
 }
 
 function rewriteJsImports(js: string, pageUrl: string): string {
@@ -762,7 +884,7 @@ router.all("/proxy", async (req, res) => {
       // Rewrite ES module import paths so the browser fetches chunks through our proxy
       // instead of hitting the origin domain directly (which breaks for absolute-path imports)
       const js = await response.text();
-      const rewrittenJs = rewriteJsImports(js, finalUrl);
+      const rewrittenJs = neutralizeFrameBusting(rewriteJsImports(js, finalUrl));
       res.setHeader("Content-Type", contentType);
       res.send(rewrittenJs);
     } else {
