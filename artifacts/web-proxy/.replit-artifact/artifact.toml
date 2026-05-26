@@ -1,31 +1,32 @@
 kind = "web"
-previewPath = "/"
-title = "Web Proxy"
-version = "1.0.0"
-id = "artifacts/web-proxy"
-router = "path"
+  previewPath = "/"
+  title = "Web Proxy"
+  version = "1.0.0"
+  id = "artifacts/web-proxy"
+  router = "path"
 
-[[integratedSkills]]
-name = "react-vite"
-version = "1.0.0"
+  [[integratedSkills]]
+  name = "react-vite"
+  version = "1.0.0"
 
-[[services]]
-name = "web"
-paths = [ "/" ]
-localPort = 21325
+  [[services]]
+  name = "web"
+  paths = [ "/" ]
+  localPort = 21325
 
-[services.development]
-run = "pnpm --filter @workspace/web-proxy run dev"
+  [services.development]
+  run = "pnpm --filter @workspace/web-proxy run dev"
 
-[services.production]
-build = [ "pnpm", "--filter", "@workspace/web-proxy", "run", "build" ]
-publicDir = "artifacts/web-proxy/dist/public"
-serve = "static"
+  [services.production]
+  build = [ "pnpm", "--filter", "@workspace/web-proxy", "run", "build" ]
+  publicDir = "artifacts/web-proxy/dist/public"
+  serve = "static"
 
-[[services.production.rewrites]]
-from = "/*"
-to = "/index.html"
+  [[services.production.rewrites]]
+  from = "/*"
+  to = "/index.html"
 
-[services.env]
-PORT = "21325"
-BASE_PATH = "/"
+  [services.env]
+  PORT = "21325"
+  BASE_PATH = "/"
+  
