@@ -78,25 +78,54 @@ function buildInjectedScript(pageUrl: string): string {
   var _realParent = window.parent;
   var _realOrigin = location.origin;   // needed for WS proxy URL after location override
 
+  // Grab the real Location.prototype href descriptor so we can read/write the
+  // actual browser URL after we override location.href below.
+  var _realHrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href')
+                   || Object.getOwnPropertyDescriptor(location, 'href');
+  function _realHref() {
+    try { return _realHrefDesc.get.call(location); } catch(e) { return ''; }
+  }
+  function _realSetHref(url) {
+    try { _realHrefDesc.set.call(location, url); } catch(e) {}
+  }
+
   // ── Iframe detection bypass ──────────────────────────────────────────
   try { Object.defineProperty(window, 'self',        { get: function() { return window; }, configurable: true }); } catch(e) {}
   try { Object.defineProperty(window, 'top',         { get: function() { return window; }, configurable: true }); } catch(e) {}
   try { Object.defineProperty(window, 'frameElement',{ get: function() { return null;   }, configurable: true }); } catch(e) {}
   try { Object.defineProperty(window, 'parent',      { get: function() { return window; }, configurable: true }); } catch(e) {}
 
+  // ── Track the real (un-proxied) URL ──────────────────────────────────
+  // SPA routers read location.pathname / location.href after pushState to
+  // decide which component to render. Without this they see '/api/proxy'
+  // instead of e.g. '/play/online' and render a 404 page.
+  var _pxCurrentUrl = __PX_URL__;
+  function _pxParsed() { try { return new URL(_pxCurrentUrl); } catch(e) { return new URL(__PX_URL__); } }
+
   // ── Location spoofing ────────────────────────────────────────────────
-  // Many sites (chess.com, etc.) check location.hostname to decide whether
-  // to render. Override so the page sees its own domain, not our proxy.
+  // Full spoof: hostname, host, origin, protocol, pathname, search, hash,
+  // href (getter + setter), location.assign, location.replace.
   try {
-    var _pxU = new URL(__PX_URL__);
-    var _pxProto    = _pxU.protocol;
-    var _pxHostname = _pxU.hostname;
-    var _pxHost     = _pxU.port ? _pxU.hostname + ':' + _pxU.port : _pxU.hostname;
-    var _pxOriginFake = _pxProto + '//' + _pxHost;
-    try { Object.defineProperty(location, 'hostname', { get: function() { return _pxHostname; }, configurable: true }); } catch(e) {}
-    try { Object.defineProperty(location, 'host',     { get: function() { return _pxHost;     }, configurable: true }); } catch(e) {}
-    try { Object.defineProperty(location, 'origin',   { get: function() { return _pxOriginFake; }, configurable: true }); } catch(e) {}
-    try { Object.defineProperty(location, 'protocol', { get: function() { return _pxProto;    }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'hostname', { get: function() { return _pxParsed().hostname; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'host',     { get: function() { var u=_pxParsed(); return u.port ? u.hostname+':'+u.port : u.hostname; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'origin',   { get: function() { var u=_pxParsed(); return u.protocol+'//'+u.hostname+(u.port?':'+u.port:''); }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'protocol', { get: function() { return _pxParsed().protocol; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'pathname', { get: function() { return _pxParsed().pathname; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'search',   { get: function() { return _pxParsed().search;   }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(location, 'hash',     { get: function() { return _pxParsed().hash;     }, configurable: true }); } catch(e) {}
+    try {
+      Object.defineProperty(location, 'href', {
+        get: function() { return _pxCurrentUrl; },
+        set: function(url) {
+          try {
+            var abs = new URL(String(url), _pxCurrentUrl).href;
+            _pxCurrentUrl = abs;
+            _realSetHref(toProxyUrl(abs));
+          } catch(e) { _realSetHref(url); }
+        },
+        configurable: true
+      });
+    } catch(e) {}
   } catch(e) {}
 
   // ── URL helpers ──────────────────────────────────────────────────────
@@ -105,27 +134,49 @@ function buildInjectedScript(pageUrl: string): string {
     try {
       if (url.indexOf(__PX_BASE__ + '?url=') !== -1) return url;
       if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') || url.startsWith('#')) return url;
-      var abs = new URL(url, __PX_URL__).href;
+      var abs = new URL(url, _pxCurrentUrl).href;
       return __PX_BASE__ + '?url=' + encodeURIComponent(abs);
     } catch(e) { return url; }
   }
 
   function toWsProxyUrl(url) {
     try {
-      var abs = new URL(url, __PX_URL__).href;
+      var abs = new URL(url, _pxCurrentUrl).href;
       // Use _realOrigin (captured before override) so the WS proxy URL points to OUR server
       var wsBase = _realOrigin.replace(/^http/, 'ws') + '/api/ws-proxy';
       return wsBase + '?url=' + encodeURIComponent(abs);
     } catch(e) { return url; }
   }
 
+  // Extract original URL from a proxy URL (?url= param)
   function extractOriginalUrl(href) {
     try {
-      var u = new URL(href, location.href);
+      var u = new URL(href);
       var param = u.searchParams.get('url');
       return param || href;
     } catch(e) { return href; }
   }
+
+  // ── location.assign / location.replace ───────────────────────────────
+  // These cause full navigations — rewrite the target URL through the proxy.
+  try {
+    location.assign = function(url) {
+      try {
+        var abs = new URL(String(url), _pxCurrentUrl).href;
+        _pxCurrentUrl = abs;
+        _realSetHref(toProxyUrl(abs));
+      } catch(e) {}
+    };
+  } catch(e) {}
+  try {
+    location.replace = function(url) {
+      try {
+        var abs = new URL(String(url), _pxCurrentUrl).href;
+        _pxCurrentUrl = abs;
+        _realSetHref(toProxyUrl(abs));
+      } catch(e) {}
+    };
+  } catch(e) {}
 
   // ── Parent notifications (debounced, deduplicated) ───────────────────
   var _lastNotifyUrl = '';
@@ -139,21 +190,42 @@ function buildInjectedScript(pageUrl: string): string {
     }, 150);
   }
 
-  window.addEventListener('load', function() { notify(__PX_URL__, document.title); });
+  window.addEventListener('load', function() { notify(_pxCurrentUrl, document.title); });
 
   var _push = history.pushState.bind(history);
   var _replace = history.replaceState.bind(history);
   history.pushState = function(s, t, url) {
-    if (url) { try { url = toProxyUrl(String(url)); } catch(e){} }
+    if (url) {
+      try {
+        var origUrl = new URL(String(url), _pxCurrentUrl).href;
+        _pxCurrentUrl = origUrl;
+        url = toProxyUrl(origUrl);
+      } catch(e) {}
+    }
     _push.call(history, s, t, url);
-    notify(extractOriginalUrl(location.href), document.title);
+    notify(_pxCurrentUrl, document.title);
   };
   history.replaceState = function(s, t, url) {
-    if (url) { try { url = toProxyUrl(String(url)); } catch(e){} }
+    if (url) {
+      try {
+        var origUrl = new URL(String(url), _pxCurrentUrl).href;
+        _pxCurrentUrl = origUrl;
+        url = toProxyUrl(origUrl);
+      } catch(e) {}
+    }
     _replace.call(history, s, t, url);
-    notify(extractOriginalUrl(location.href), document.title);
+    notify(_pxCurrentUrl, document.title);
   };
-  window.addEventListener('popstate', function() { notify(extractOriginalUrl(location.href), document.title); });
+  window.addEventListener('popstate', function() {
+    // After back/forward navigation the actual browser URL is a proxy URL — extract the real one
+    try {
+      var realHref = _realHref();
+      var u = new URL(realHref);
+      var param = u.searchParams.get('url');
+      if (param) _pxCurrentUrl = param; else _pxCurrentUrl = realHref;
+    } catch(e) {}
+    notify(_pxCurrentUrl, document.title);
+  });
 
   // ── Intercept fetch ──────────────────────────────────────────────────
   var _fetch = window.fetch;
